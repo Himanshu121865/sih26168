@@ -12,6 +12,32 @@ Guide for AI coding agents (and humans) working in this repo.
 - **Dataset (official):** [IO-VNBD](https://github.com/onyekpeu/IO-VNBD) — 40h/1300km V + 58h/4400km S @10Hz (UK/NG/FR). Mandatory for proposal.
 - **Target:** **95% accuracy = <5% drift over 1km** (ISRO pass is <10%, paper achieves 0.64% on car).
 
+## Training Results — 2026-08-30 Colab T4 50 epochs (Step 5 done)
+
+**Run:** `sih26168_colab.ipynb` on Tesla T4, `AVNetLite` 460,136 params, `164366 train / 41092 val` windows (205k total from `M+S1+S2` 10Hz→100Hz, West=200 stride10).
+
+| Epoch | Train MSE | Val MSE | LR | Best |
+|-------|-----------|---------|----|------|
+| 1 | 1.1366 | 0.9573 | 1e-3 | 0.9573 |
+| 19 | 0.3687 | 0.4174 | 1e-3 | 0.4174 |
+| 23 | 0.3383 | **0.4033** | 1e-3 | 0.4033 |
+| 33 | 0.2556 | **0.3721** | 5e-4 | 0.3721 (LR halved at 32) |
+| 48 | 0.2113 | **0.3361** | 5e-4 | **0.3361** ← best |
+| 50 | 0.2094 | 0.3495 | 5e-4 | 0.3361 |
+
+- **Best val MSE 0.3361 → RMSE 0.58 m/s.** At 8-10 m/s (30 km/h) ≈ 6% vel error.
+- **Drift (eval_drift.py:82, 600 windows =60s, total_dist 138.4m):** Naive 16.4m 11.8% | **AI 4.6m 3.3%** | **AI+map 2.8m 2.0%** → **96.7% without map, 98.0% with map — PASSES 95% on car.**
+- **ONNX export:** `model.onnx 0.01 MB + model.onnx.data 1.9M`, validate `max diff 0.000002 <1e-3` ✓. TFLite fallback (needs `onnx2tf`).
+- **Checkpoint:** `experiments/checkpoints/model_avnet_stage1.p` 1.8M — **NOT yet pushed** (gitignored `*.p` + `reports/`), need `git add -f` in Colab (see below).
+- **Screening blocker:** `reports/drift_plot.png` generated in Colab but not pushed — same `git add -f`.
+
+**Next to push from Colab:**
+```bash
+!git add -f experiments/checkpoints/model_avnet_stage1.p reports/drift_plot.png reports/drift_plot.json model.onnx model.onnx.data scaler.json
+!git commit -m "add trained AVNetLite 50 epochs 0.336 MSE 3.3% drift"
+!git push
+```
+
 ## Key Decision — 2026-08-29
 
 **Only Option B (train from scratch) is viable — best possible result only.** Verified 2026-08-29:
