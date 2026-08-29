@@ -40,6 +40,7 @@ class StationaryDetector:
         self._a_norms.append(float(np.linalg.norm(a_body)))
         self._w_norms.append(float(np.linalg.norm(w_body)))
         if len(self._a_norms) < self.window_size:
+            self._is_stationary = False
             return False
         a_var = float(np.var(self._a_norms))
         w_var = float(np.var(self._w_norms))
@@ -56,6 +57,33 @@ class StationaryDetector:
             self._candidate_start_ns = None
             self._is_stationary = False
         return self._is_stationary
+
+    @property
+    def is_stationary(self) -> bool:
+        return self._is_stationary
+
+    @property
+    def stationary_duration_s(self) -> float:
+        if self._candidate_start_ns is None:
+            return 0.0
+        return max(0.0, (self._current_t_ns - self._candidate_start_ns) * 1e-9)
+
+    # For ESKF wiring (harsh eskf.py:237-297): ZUPT y=-v_world, H=[1 at dv], R=diag(0.02^2); ZARU y=-(gyro-bg), H[5]=-1, R=0.005
+    def get_zupt_measurement(self):
+        """Returns (y, R) for ZUPT when stationary: y=-v_world (2D), R=diag(0.02^2)"""
+        if not self._is_stationary:
+            return None
+        y = np.zeros(2)  # device expects v=0, innovation = -v_pred
+        R = np.diag([0.02**2, 0.02**2])
+        return y, R
+
+    def get_zaru_measurement(self, gyro_bias):
+        """ZARU: y=-(gyro - bg), H at db_g, R=0.005^2"""
+        if not self._is_stationary:
+            return None
+        # caller should compute y = -(w_body - bg_pred)
+        R = np.diag([0.005**2])
+        return R
 
 # Simple function for offline: detect stationary windows in numpy arrays
 def detect_stationary_windows(acc: np.ndarray, gyro: np.ndarray, hz=100, **kwargs):
