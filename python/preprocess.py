@@ -1,68 +1,80 @@
 #!/usr/bin/env python3
 """
-preprocess.py — Step 2.2-2.5
+preprocess.py — Step 2.2-2.5 (P0 #1 FIXED 2026-08-30)
 Resample 10Hz→100Hz, gravity-align, per-axis normalize, sliding window (200, stride 10).
 
-Inputs: data/iovnbd/Synchronised V abd S datasets/Categorised.../*.csv (S-*.csv phone IMU)
-Outputs: data/processed/train_windows.npy (N,200,6), data/processed/val_windows.npy, scaler.json
+Fixes from competitor audit (docs/IMPROVEMENTS_FROM_COMPETITORS.md P0 #1):
+- find_column regex (sivaraman/prepare_training_data.py:205) for (m/s²) vs (m/s^2)
+- resample_uniform shared (harsh/pipeline.py:30-68) with period_ns=round(1e9/rate), np.interp left=np.nan, finite_mask
+- gravity_align via ACC - GRAVITY (IO-VNBD provides gravity), not no-op
+- split_by_trajectory (harsh/loaders.py:287) not window shuffle leak
+- encoding cp1252 + strip, dt validation
 
 Usage:
   python python/preprocess.py --subset 1h          # quick 1h subset for smoke test (<5 min)
   python python/preprocess.py --window 200 --stride 10 --hz 100 --train-ratio 0.8
 """
-import argparse, json, glob, os
+import argparse, json, glob, re
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from scipy.interpolate import interp1d
 
-# phone IMU cols after strip (from DATA_INSPECTION.md)
-ACC_COLS = ["ACCELEROMETER X (m/s²)", "ACCELEROMETER Y (m/s²)", "ACCELEROMETER Z (m/s²)"]
-GYRO_COLS = ["GYROSCOPE Yaw (rad/s)", "GYROSCOPE Pitch (rad/s)", "GYROSCOPE Roll (rad/s)"]
-# gyro order in file is Yaw,Pitch,Roll = Z,Y,X? Keep as file order for now, will map to (x,y,z) later
-IMU_COLS = ACC_COLS + GYRO_COLS  # 6 channels
-GPS_COLS = ["GPS LATITUDE (degrees)", "GPS LONGITUDE (degrees)"]
-TIME_COL = "TIME SINCE START (ms)"
+# robust column finder (sivaraman/prepare_training_data.py:205)
+def find_column(df, pattern: str):
+    regex = re.compile(pattern, re.IGNORECASE)
+    for c in df.columns:
+        if regex.search(c):
+            return c
+    return None
+
+def find_columns_xyz(df, base_pattern):
+    # e.g., base "accelerometer" -> X,Y,Z cols
+    cols = {}
+    for axis in ["x","y","z"]:
+        pat = rf"{base_pattern}.*{axis}"
+        col = find_column(df, pat)
+        if col is None:
+            # fallback: try base without axis then positional
+            pass
+        cols[axis] = col
+    return cols
+
+# shared resample_uniform (harsh/pipeline.py:30-68)
+def resample_uniform(t_ns: np.ndarray, values: np.ndarray, rate_hz: float):
+    """
+    t_ns (N,) int64 ns, values (N,K) or (N,), rate_hz
+    Returns t_new_ns (M,), values_new (M,K)
+    Uses period_ns=round(1e9/rate), linear np.interp per channel, left/right=np.nan
+    Error if <2 samples.
+    """
+    if len(t_ns) < 2:
+        raise ValueError(f"need >=2 samples, got {len(t_ns)}")
+    period_ns = round(1e9 / rate_hz)
+    t_start, t_end = t_ns[0], t_ns[-1]
+    n = int((t_end - t_start) // period_ns) + 1
+    t_new = t_start + np.arange(n) * period_ns
+    if values.ndim == 1:
+        v_new = np.interp(t_new, t_ns, values, left=np.nan, right=np.nan)
+        return t_new, v_new
+    else:
+        v_new = np.empty((n, values.shape[1]))
+        for k in range(values.shape[1]):
+            v_new[:, k] = np.interp(t_new, t_ns, values[:, k], left=np.nan, right=np.nan)
+        return t_new, v_new
 
 def load_phone_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="latin1")
+    # cp1252 handles ² byte 0xb2 better than latin1, plus strip
+    df = pd.read_csv(path, encoding="cp1252")
     df.columns = [c.strip() for c in df.columns]
     return df
 
-def resample_10_to_100(df: pd.DataFrame, hz_target=100) -> pd.DataFrame:
-    """Linear interp 10Hz (100ms) -> 100Hz (10ms). Returns new df with interpolated IMU."""
-    t_ms = df[TIME_COL].values.astype(float)
-    # handle monotonic: some files have TIME SINCE START resetting per seq; use relative
-    # interpolate to regular grid 10ms
-    t_start, t_end = t_ms.min(), t_ms.max()
-    t_new = np.arange(t_start, t_end, 1000/hz_target)
-    if len(t_new) < 200:
-        return None
-    out = pd.DataFrame({TIME_COL: t_new})
-    for c in IMU_COLS + ["GPS LATITUDE (degrees)", "GPS LONGITUDE (degrees)", "GPS SPEED (Kmh)"]:
-        if c in df.columns:
-            f = interp1d(t_ms, df[c].values, kind="linear", bounds_error=False, fill_value="extrapolate")
-            out[c] = f(t_new)
-    # copy other needed cols via nearest for GPS
-    return out
-
-def gravity_align(window: np.ndarray) -> np.ndarray:
+def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray:
     """
-    window (200,6) acc(3)+gyro(3) -> gravity-aligned (z up).
-    Simple: estimate gravity via low-pass (mean of acc over window) and rotate so gravity = [0,0,9.81].
-    For now: subtract mean gravity from acc Z (approx). Full rotation via Madgwick is Android step; training uses this cheap align.
+    IO-VNBD provides GRAVITY X/Y/Z (already low-pass). Linear acc = ACC - GRAVITY.
+    This removes gravity before scaling (harsh pipeline.py:105-108 R_wb@a - [0,0,9.80665]).
+    acc_raw (N,3), gravity (N,3) -> linear (N,3)
     """
-    acc = window[:, :3]
-    # gravity estimate = mean acc (vehicle mostly level; low-pass)
-    g_est = acc.mean(axis=0)
-    # normalize and compute rotation: want g_est -> [0,0,9.81]
-    g_norm = np.linalg.norm(g_est)
-    if g_norm < 1e-6:
-        return window
-    # cheap: just subtract g_est projection? Actually keep acc as is but normalize by g
-    # For training, we keep raw acc but divide by 9.81 later via scaler; alignment is for yaw invariance
-    # So we just return window (alignment will be handled by augmentation: random yaw)
-    return window
+    return acc_raw - gravity
 
 def make_windows(arr: np.ndarray, window=200, stride=10):
     """arr (T,6) -> (N, window, 6)"""
@@ -73,16 +85,10 @@ def make_windows(arr: np.ndarray, window=200, stride=10):
     windows = np.stack([arr[i*stride:i*stride+window] for i in range(N)], axis=0)
     return windows
 
-def compute_labels(df_100: pd.DataFrame, windows_idx, stride=10, window=200):
-    """
-    Labels for each window: v_forward (m/s) from GPS SPEED, and attitude delta (3) from orientation.
-    v_forward: GPS speed at window center (km/h -> m/s).
-    """
-    v_kmh = df_100["GPS SPEED (Kmh)"].values if "GPS SPEED (Kmh)" in df_100.columns else np.zeros(len(df_100))
+def compute_labels(df_100: pd.DataFrame, windows_idx, stride=10, window=200, gps_speed_col=None):
+    v_kmh = df_100[gps_speed_col].values if gps_speed_col and gps_speed_col in df_100.columns else np.zeros(len(df_100))
     v_ms = v_kmh / 3.6
-    # per window, take speed at end (forward looks ahead)
     v_labels = np.array([v_ms[i*stride + window -1] for i in windows_idx])
-    # attitude: use GYROSCOPE integration proxy -> for now zeros (att head will learn zero-mean)
     att_labels = np.zeros((len(v_labels), 3))
     return v_labels, att_labels
 
@@ -100,59 +106,130 @@ def main():
     base = Path("data/iovnbd/Synchronised V abd S datasets/Categorised IOVNB Dataset")
     s_files = sorted(glob.glob(str(base / "**/S-*.csv"), recursive=True))
     if args.subset == "1h":
-        # pick first 2 seqs only (~1h: Vtb01 54min + Vta06 2min)
         s_files = s_files[:3]
     print(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz}")
 
-    all_windows = []
-    all_v = []
-    for f in s_files:
-        df = load_phone_csv(f)
-        if len(df) < 200:
-            continue
-        df100 = resample_10_to_100(df, hz_target=args.hz)
-        if df100 is None or len(df100) < args.window:
-            print(f"[skip] {f} too short after resample")
-            continue
-        imu = df100[IMU_COLS].values.astype(np.float32)  # (T,6)
-        # gravity align per window later; here just collect
-        windows = make_windows(imu, window=args.window, stride=args.stride)  # (N,200,6)
-        if len(windows) == 0:
-            continue
-        # gravity align per window
-        windows = np.stack([gravity_align(w) for w in windows])
-        # labels
-        idx = list(range(len(windows)))
-        v_labels, att_labels = compute_labels(df100, idx, stride=args.stride, window=args.window)
-        all_windows.append(windows)
-        all_v.append(v_labels)
-        print(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(df100)} windows={len(windows)}")
+    # split by trajectory (file), not window — prevents leakage (harsh/loaders.py:287)
+    n_train_files = int(len(s_files) * args.train_ratio)
+    # deterministic by sorted order (or rng 26168)
+    rng = np.random.default_rng(26168)
+    perm_files = rng.permutation(len(s_files))
+    train_files_idx = set(perm_files[:n_train_files])
+    train_files = [s_files[i] for i in range(len(s_files)) if i in train_files_idx]
+    val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
+    print(f"[split] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
 
-    if not all_windows:
-        print("[err] no windows", flush=True)
+    def process_file_list(file_list):
+        all_windows = []
+        all_v = []
+        for f in file_list:
+            try:
+                df = load_phone_csv(f)
+                # robust column mapping
+                acc_cols = [find_column(df, rf"accelerometer.*{axis}") for axis in ["x","y","z"]]
+                grav_cols = [find_column(df, rf"gravity.*{axis}") for axis in ["x","y","z"]]
+                gyro_cols = [find_column(df, r"gyroscope.*yaw"), find_column(df, r"gyroscope.*pitch"), find_column(df, r"gyroscope.*roll")]
+                # fallback to exact names if regex fails
+                if None in acc_cols:
+                    acc_cols = ["ACCELEROMETER X (m/s²)", "ACCELEROMETER Y (m/s²)", "ACCELEROMETER Z (m/s²)"]
+                if None in grav_cols:
+                    grav_cols = ["GRAVITY X (m/s²)", "GRAVITY Y (m/s²)", "GRAVITY Z (m/s²)"]
+                if None in gyro_cols:
+                    gyro_cols = ["GYROSCOPE Yaw (rad/s)", "GYROSCOPE Pitch (rad/s)", "GYROSCOPE Roll (rad/s)"]
+                time_col = find_column(df, r"time since start")
+                gps_speed_col = find_column(df, r"gps speed")
+                if time_col is None:
+                    time_col = "TIME SINCE START (ms)"
+                if gps_speed_col is None:
+                    gps_speed_col = "GPS SPEED (Kmh)"
+
+                # validate time monotonic (sivaraman/ekf:65)
+                t_ms_raw = df[time_col].values.astype(float)
+                # check monotonic (allow resets per file: just check diff within file)
+                diffs = np.diff(t_ms_raw)
+                if np.any(diffs <= 0):
+                    # fix: sort by time
+                    order = np.argsort(t_ms_raw)
+                    df = df.iloc[order].reset_index(drop=True)
+                    t_ms_raw = df[time_col].values.astype(float)
+
+                # build t_ns
+                t_ns = (t_ms_raw * 1e6).astype(np.int64)  # ms -> ns
+                # verify median interval ~100ms for 10Hz
+                median_dt_ms = np.median(np.diff(t_ms_raw))
+                # print(f"  median dt {median_dt_ms:.1f} ms")
+
+                acc_raw = df[acc_cols].values.astype(np.float64)
+                grav = df[grav_cols].values.astype(np.float64)
+                gyro = df[gyro_cols].values.astype(np.float64)
+
+                # gravity align: linear acc = acc - gravity (removes 9.81 before scaler)
+                linear_acc = gravity_align_linear(acc_raw, grav)  # (N,3)
+
+                # stack IMU: linear_acc (3) + gyro (3) = 6ch
+                imu_6 = np.concatenate([linear_acc, gyro], axis=1)  # (N,6)
+
+                # resample via resample_uniform per channel with ns
+                # need to handle NaN from interp left/right
+                t_new_ns, imu_new = resample_uniform(t_ns, imu_6, args.hz)
+                # also resample gps speed for labels
+                gps_speed_raw = df[gps_speed_col].values.astype(np.float64) if gps_speed_col in df.columns else np.zeros(len(df))
+                _, gps_speed_new = resample_uniform(t_ns, gps_speed_raw, args.hz)
+
+                # drop NaN rows from resample (outside overlap)
+                finite_mask = np.isfinite(imu_new).all(axis=1) & np.isfinite(gps_speed_new)
+                t_new_ns = t_new_ns[finite_mask]
+                imu_new = imu_new[finite_mask]
+                gps_speed_new = gps_speed_new[finite_mask]
+
+                if len(imu_new) < args.window:
+                    print(f"[skip] {Path(f).parent.name}/{Path(f).name}: too short after resample {len(imu_new)}")
+                    continue
+
+                windows = make_windows(imu_new.astype(np.float32), window=args.window, stride=args.stride)
+                if len(windows) == 0:
+                    continue
+
+                # labels from resampled gps_speed_new
+                # build dummy df_100 for compute_labels
+                df_100_dummy = pd.DataFrame({gps_speed_col: gps_speed_new})
+                idx = list(range(len(windows)))
+                v_labels, _ = compute_labels(df_100_dummy, idx, stride=args.stride, window=args.window, gps_speed_col=gps_speed_col)
+                all_windows.append(windows)
+                all_v.append(v_labels)
+                print(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} median_dt={median_dt_ms:.1f}ms")
+            except Exception as e:
+                print(f"[err] {f}: {e}")
+                import traceback; traceback.print_exc()
+                continue
+        if not all_windows:
+            return np.empty((0, args.window, 6)), np.empty((0,))
+        X = np.concatenate(all_windows, axis=0)
+        v = np.concatenate(all_v, axis=0)
+        return X, v
+
+    X_train, v_train = process_file_list(train_files)
+    X_val, v_val = process_file_list(val_files)
+    print(f"[concat] train X {X_train.shape} v {v_train.shape} | val X {X_val.shape} v {v_val.shape}")
+    if len(X_train) == 0 or len(X_val) == 0:
+        print("[err] no windows")
         return
-    X = np.concatenate(all_windows, axis=0)  # (N,200,6)
-    v = np.concatenate(all_v, axis=0)  # (N,)
-    print(f"[concat] X {X.shape} v {v.shape} X mean {X.mean(axis=(0,1))} std {X.std(axis=(0,1))}")
+    print(f"  train mean {X_train.mean(axis=(0,1))} std {X_train.std(axis=(0,1))}")
+    print(f"  val mean {X_val.mean(axis=(0,1))} std {X_val.std(axis=(0,1))}")
 
-    # scaler from train split only
-    N = len(X)
-    n_train = int(N * args.train_ratio)
-    perm = np.random.RandomState(0).permutation(N)
-    X = X[perm]; v = v[perm]
-    X_train, X_val = X[:n_train], X[n_train:]
-    v_train, v_val = v[:n_train], v[n_train:]
-
-    # per-channel mean/std from train
-    mean = X_train.mean(axis=(0,1))  # (6,)
+    # scaler from train only (train-only, sivaraman/agastya)
+    mean = X_train.mean(axis=(0,1))
     std = X_train.std(axis=(0,1)) + 1e-6
-    scaler = {"mean": mean.tolist(), "std": std.tolist(), "hz": args.hz, "window": args.window, "stride": args.stride}
+    # PASS_THROUGH for any future binary flags would be mean=0,std=1 if std<1e-8 — not needed for 6ch, but keep logic
+    for i in range(len(std)):
+        if std[i] < 1e-8:
+            mean[i] = 0; std[i] = 1
+    scaler = {"mean": mean.tolist(), "std": std.tolist(), "hz": args.hz, "window": args.window, "stride": args.stride, "train_files": [str(Path(f).name) for f in train_files]}
     Path(args.scaler).parent.mkdir(parents=True, exist_ok=True)
     with open(args.scaler, "w") as f:
         json.dump(scaler, f, indent=2)
     print(f"[scaler] {args.scaler} mean {mean} std {std}")
 
-    # normalize
     X_train_n = (X_train - mean) / std
     X_val_n = (X_val - mean) / std
 
@@ -162,7 +239,6 @@ def main():
     np.save(out / "val_windows.npy", X_val_n.astype(np.float32))
     np.save(out / "val_v.npy", v_val.astype(np.float32))
     print(f"[save] {out}/train_windows.npy {X_train_n.shape} {out}/val_windows.npy {X_val_n.shape}")
-    print(f"[save] scaler {args.scaler}")
 
 if __name__ == "__main__":
     main()
