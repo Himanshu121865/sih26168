@@ -92,6 +92,25 @@ def compute_labels(df_100: pd.DataFrame, windows_idx, stride=10, window=200, gps
     att_labels = np.zeros((len(v_labels), 3))
     return v_labels, att_labels
 
+def is_window_stationary(window_6: np.ndarray, hz=100):
+    """
+    ZUPT check per window (harsh zupt.py:39-40 thresholds, scaled for vehicle 100Hz).
+    window_6 (200,6) linear_acc(3)+gyro(3) @100Hz
+    Returns True if stationary (acc var <0.05 and gyro var <0.01 for 0.5s)
+    """
+    # use norms
+    acc = window_6[:, :3]
+    gyro = window_6[:, 3:6]
+    a_norm = np.linalg.norm(acc, axis=1)
+    w_norm = np.linalg.norm(gyro, axis=1)
+    # variance over window (200 samples =2s, but detector uses 0.5s sliding — we check whole window var)
+    # For vehicle, use 0.5s sub-window at end
+    tail = 50  # last 0.5s @100Hz
+    a_var = np.var(a_norm[-tail:])
+    w_var = np.var(w_norm[-tail:])
+    # speed gate will be applied via v_label <0.5 later, here just IMU
+    return a_var < 0.05 and w_var < 0.01
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset", choices=["1h","full"], default="full")
@@ -191,26 +210,45 @@ def main():
                     continue
 
                 # labels from resampled gps_speed_new
-                # build dummy df_100 for compute_labels
                 df_100_dummy = pd.DataFrame({gps_speed_col: gps_speed_new})
                 idx = list(range(len(windows)))
                 v_labels, _ = compute_labels(df_100_dummy, idx, stride=args.stride, window=args.window, gps_speed_col=gps_speed_col)
+
+                # ZUPT stationary flags per window (P1 wiring, harsh zupt.py:39-40)
+                # Use IMU variance + speed gate (<0.5 m/s)
+                stationary = np.array([is_window_stationary(w, hz=args.hz) for w in windows])
+                # also gate by speed: if v_label <0.5, keep stationary, else False (vehicle moving but low var e.g. smooth highway)
+                stationary = stationary & (v_labels < 0.5)
+                # for stationary windows, force v_label=0 (ZUPT)
+                v_labels = np.where(stationary, 0.0, v_labels)
+
                 all_windows.append(windows)
                 all_v.append(v_labels)
-                print(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} median_dt={median_dt_ms:.1f}ms")
+                # also collect stationary for saving (optional)
+                if not hasattr(process_file_list, "all_stationary"):
+                    process_file_list.all_stationary = []
+                process_file_list.all_stationary.append(stationary)
+                print(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms")
             except Exception as e:
                 print(f"[err] {f}: {e}")
                 import traceback; traceback.print_exc()
                 continue
         if not all_windows:
-            return np.empty((0, args.window, 6)), np.empty((0,))
+            return np.empty((0, args.window, 6)), np.empty((0,)), np.empty((0,), dtype=bool)
         X = np.concatenate(all_windows, axis=0)
         v = np.concatenate(all_v, axis=0)
-        return X, v
+        # collect stationary from attribute
+        if hasattr(process_file_list, "all_stationary"):
+            stationary = np.concatenate(process_file_list.all_stationary, axis=0)
+            # clear for next call
+            delattr(process_file_list, "all_stationary")
+        else:
+            stationary = np.zeros(len(X), dtype=bool)
+        return X, v, stationary
 
-    X_train, v_train = process_file_list(train_files)
-    X_val, v_val = process_file_list(val_files)
-    print(f"[concat] train X {X_train.shape} v {v_train.shape} | val X {X_val.shape} v {v_val.shape}")
+    X_train, v_train, stat_train = process_file_list(train_files)
+    X_val, v_val, stat_val = process_file_list(val_files)
+    print(f"[concat] train X {X_train.shape} v {v_train.shape} stationary {stat_train.sum()}/{len(stat_train)} | val X {X_val.shape} v {v_val.shape} stationary {stat_val.sum()}/{len(stat_val)}")
     if len(X_train) == 0 or len(X_val) == 0:
         print("[err] no windows")
         return
