@@ -1,0 +1,23 @@
+# data
+data/
+*.npy
+*.zip
+*.p
+*.onnx
+*.tflite
+*.data
+scaler.json
+model.*
+reports/
+# venv
+.venv/
+venv/
+__pycache__/
+*.pyc
+# refs (cloned, not needed to push — can re-clone)
+ref/
+# IDE
+.vscode/
+.idea/
+# OS
+.DS_Store
