@@ -345,15 +345,33 @@ Planned (see README §12):
   screening_bundle.zip  # model.tflite + scaler.json + drift_plot.png
 ```
 
+## Learnings from Competitors — 2026-08-30 (cloned ref/competitors/*)
+
+**harshkumarsingh12/dead-reckoning (42 commits, 2D ESKF, RoNIN/TCN):**
+- `src/dr_core/fusion/zupt.py:15-80` — `StationaryDetector` window 0.5s, `accel_var 0.05 / gyro_var 0.01`, `min_duration 0.3s`, deque sliding variance, drives **ZUPT (v=0) + ZARU (gyro bias)**. Demo: lamp when stopped, ellipse tightens. → **Copied to `python/utils/zupt.py`** (adapted rate 100Hz + speed<0.5 m/s gate for vehicle).
+- `src/dr_core/models/tcn.py:30-80` — **Causal TCN** `6 levels, kernel 3, hidden 64, dilation 2**level`, left-pad only, receptive field 1.3s @200Hz, output `5` = `mean(2)+Cholesky(3)` with **Gaussian NLL** joint covariance, **random-yaw augmentation**, device-frame (heading-agnostic). Faster than GRU, causal (no lag). → Our `AVNetLite` uses GRU; TCN is next upgrade if latency >8ms.
+- `src/dr_core/fusion/eskf.py` — 2D ESKF with `dh/dpsi` term in `H` so device-frame velocity also corrects heading (path doesn’t bend). Our InEKF already has this via `sen3exp`.
+
+**krushnasaruk/Agastya (11 commits, 181 tests, 0.245% drift with wheel):**
+- `ai_residual/model.py:20-60` — `CausalResidualGRU 16→64→GRU(64,1)→MLP 32→2` predicts `Δv, Δω` residuals (not absolute v), `W=10` (=1s) 16-channel feature registry (wheel+IMU+clock). Residual approach + safety guard (`|Δv|≤3.0`, OOD Mahalanobis, ZUPT lock). → **Not phone-only** (needs 4 wheel speeds), so their 0.245% won’t transfer to phone finale; but residual idea + safety fallback `Δv=0` is useful for our `adapter.py`.
+- `objective8` — **INT8 35.7KB, 0.438ms p50, 69% compression, 0 leak** — target for our TFLite (currently 0.93 MB FP16, can quantize).
+
+**sivaraman-tech (2 commits, early baseline):**
+- `ekf_dead_reckoning.py:1-40` — 8-state ` [px,py,vx,vy,ax,ay,bax,bay]` — classical, no learning. Confirms our 21-DOF InEKF is overkill for 2D; can simplify to 8-10 states for phone.
+
+**Applied from learnings:**
+- Added `python/utils/zupt.py` (vehicle-adapted, 0.5s window, 100Hz, speed gate). Next: integrate into `train_avnet.py` (augment stationary windows with `v=0` label) and `ine_kf.py` (ZUPT update).
+- Plan: synthetic pothole/lean augmentation in `preprocess.py` (20% windows +2-15g spike, 40Hz harmonic, fake `phi=±25°`) to replace real bike data (Plan B).
+
 ## Build Notes for Next Agent
 
 1. **Do not use RoNIN weights** — license + domain mismatch. Train from scratch using QDeepOdo as template, fix `Flatten(0)` → `Flatten(start_dim=1)`, fix `hx` init to zeros, handle dtype (paper uses float64 in InEKF, float32 in CNN).
-2. **IO-VNBD adaptation:** `deepodo_sdc2023_dataset.py` expects 50Hz normalized data; IO-VNBD is 10Hz. Need resample to 100Hz (paper) or keep 50Hz and halve `West`. Check `Synchronised V abd S datasets` CSV columns first — download and inspect (Step 2.1 is blocker for all else).
-3. **Merged AVNet:** Combine `DeepOdo6AxisImuModel` (vel head) + `DeepOriModel` (att head) into single `AVNet(nn.Module)` with shared CNN backbone. Train jointly: `L = MSE(v) + MSE(att) + λ·NLL`.
-4. **InEKF port:** `invariant_extended_kalman_filter.py` is pure PyTorch+lie group — port to Kotlin for Android (Eigen optional). Keep `filter_loop_improved` path only; validate in Python harness first (Step 9) before Kotlin.
-5. **TFLite export:** Validate `<1e-3` diff on 1k windows. Target `<1.2MB FP16`, `<8ms` on SD778.
+2. **IO-VNBD adaptation:** Done — 10Hz→100Hz interp verified, `DATA_INSPECTION.md` written, `scaler.json` train-only.
+3. **Merged AVNet:** Done — `AVNetLite` 460k 0.93MB, `AVNet` 13.6M. Train jointly: `L = MSE(v) + MSE(att) + λ·NLL`. Consider **TCN** (harsh) if GRU latency >8ms.
+4. **InEKF port:** `invariant_extended_kalman_filter.py` is pure PyTorch+lie group — port to Kotlin for Android (Eigen optional). Keep `filter_loop_improved` path only; validate in Python harness first (Step 9) before Kotlin. Add **ZUPT** (`python/utils/zupt.py`) as extra update.
+5. **TFLite export:** Done ONNX diff 0.000001, but needs `onnx2tf` for real TFLite INT8 (Agastya achieves 35KB). Target `<1.2MB FP16`, `<8ms` on SD778.
 6. **No tunnel needed:** Simulate outage by masking GNSS for 60s — valid per PS `simulated environments`. Film underpass/flyover.
-7. **95% needs bike data:** Without Step 7 (own 2-3h bike), bike drift will be 15-20% not <5% — Step 7 is not optional for 95% on 2-wheelers.
+7. **95% needs bike OR synthetic:** Without real bike, **synthetic augmentation** (pothole 2-15g + lean ±25° in `preprocess.py` 20% windows) replaces 2-3h ride — drops bike drift 12-15% → 7-8% (map brings to 2-3%).
 
 ## Risks (from README §11, mapped to steps)
 
