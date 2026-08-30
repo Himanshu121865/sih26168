@@ -1,0 +1,3 @@
+model: model.tflite
+windows: 200
+max_abs_diff: 0.00000668
