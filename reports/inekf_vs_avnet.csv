@@ -1,0 +1,5 @@
+trajectory,naive_drift_pct,avnet_drift_pct,inekf_drift_pct
+val_start0_600w_178m,8.47,0.37,0.15
+val_start2000_600w_35m,99.54,50.10,25.42
+val_start4000_600w_105m,44.24,17.75,17.34
+val_start8000_600w_226m,96.46,2.41,2.67
