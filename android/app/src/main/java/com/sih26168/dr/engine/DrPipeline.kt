@@ -40,10 +40,13 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     fun onImu(acc: DoubleArray, gyro: DoubleArray, dt: Double) {
         alignment.updateAccel(acc)
         lean.update(acc)
-        // normalize + push into the model's 200-sample ring; inference fires every 10th push
+        // CRITICAL: model was trained on linear acc (acc - gravity), not raw.
+        // Use LeanDetector's low-pass gravity estimate (gEst) to match python/preprocess.py:186.
+        val g = lean.gEst
+        val linAcc = doubleArrayOf(acc[0] - g[0], acc[1] - g[1], acc[2] - g[2])
         val norm = FloatArray(6)
         scaler.normalize(
-            floatArrayOf(acc[0].toFloat(), acc[1].toFloat(), acc[2].toFloat(),
+            floatArrayOf(linAcc[0].toFloat(), linAcc[1].toFloat(), linAcc[2].toFloat(),
                 gyro[0].toFloat(), gyro[1].toFloat(), gyro[2].toFloat()),
             norm,
         )
@@ -52,10 +55,15 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             ekf.propagate(gyro, acc, dt)
             val rawV = max(avnet.vPred.toDouble(), 0.0)
             val (vLatRaw, rScale) = lean.nhc(rawV, lean.pBike > 0.5)
-            // ZUPT: check IMU variance only, not rawV (which hallucinates 5.5 when still) — fixes table still
+            // ZUPT: IMU variance + small-motion deadband (hand-held table -> 0.0, small shake -> clamp)
+            val linAccMag = Math.sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2])
+            val gyroMag = Math.sqrt(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2])
             val imuStill = zupt.update(acc, gyro, dt, null)
-            val zuptActive = imuStill || rawV < 0.3
-            val v = if (zuptActive) 0.0 else rawV
+            val isSmallMotion = linAccMag < 1.0 && gyroMag < 0.5
+            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion
+            // also clamp rawV that is implausibly high for small motion
+            val vClamped = if (isSmallMotion && rawV > 2.0) 0.0 else rawV
+            val v = if (zuptActive) 0.0 else vClamped
             val vLat = if (zuptActive) 0.0 else vLatRaw
             val rFwd = if (zuptActive) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
             val z = doubleArrayOf(v, vLat, 0.0)

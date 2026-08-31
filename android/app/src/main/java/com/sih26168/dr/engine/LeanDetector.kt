@@ -9,8 +9,8 @@ import kotlin.math.sin
  * p_bike currently fixed 0.0 (car mode) until the bike classifier is trained (Step 8).
  */
 class LeanDetector(private val alpha: Double = 0.02) {
-    // low-passed gravity estimate in body frame
-    private val gEst = doubleArrayOf(0.0, 0.0, 9.81)
+    // low-passed gravity estimate in body frame — exposed for DrPipeline linear acc
+    val gEst = doubleArrayOf(0.0, 0.0, 9.81)
     var phi = 0.0; private set          // lean angle rad
     var pBike = 0.0; private set
 
