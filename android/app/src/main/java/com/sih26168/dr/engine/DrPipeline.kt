@@ -55,14 +55,17 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             ekf.propagate(gyro, acc, dt)
             val rawV = max(avnet.vPred.toDouble(), 0.0)
             val (vLatRaw, rScale) = lean.nhc(rawV, lean.pBike > 0.5)
-            // ZUPT: IMU variance + small-motion deadband (hand-held table -> 0.0, small shake -> clamp)
+            // ZUPT: IMU variance + small-motion deadband + table-vs-vehicle gate
             val linAccMag = Math.sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2])
             val gyroMag = Math.sqrt(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2])
             val imuStill = zupt.update(acc, gyro, dt, null)
             val isSmallMotion = linAccMag < 1.0 && gyroMag < 0.5
-            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion
-            // also clamp rawV that is implausibly high for small motion
-            val vClamped = if (isSmallMotion && rawV > 2.0) 0.0 else rawV
+            // Table detection: phone flat on table (acc Z ~9.81, tilt <15°) is not vehicle — clamp
+            val isFlatOnTable = Math.abs(acc[2]) > 8.5 && Math.abs(acc[0]) < 2.0 && Math.abs(acc[1]) < 2.0 && Math.abs(lean.phi) < Math.toRadians(15.0)
+            val isTableSlide = isFlatOnTable && linAccMag < 2.0
+            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion || isTableSlide
+            // also clamp rawV that is implausibly high for small motion / table
+            val vClamped = if ((isSmallMotion || isTableSlide) && rawV > 2.0) 0.0 else rawV
             val v = if (zuptActive) 0.0 else vClamped
             val vLat = if (zuptActive) 0.0 else vLatRaw
             val rFwd = if (zuptActive) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
