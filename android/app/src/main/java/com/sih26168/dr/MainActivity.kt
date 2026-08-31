@@ -66,6 +66,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var lastGnssLon: Double? = null
     private var mapReady = false
     private var pendingCenter: LatLng? = null
+    private var loadingOverlay: android.view.View? = null
+    private var firstFixDone = false
 
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
 
@@ -77,6 +79,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         statusChip = findViewById(R.id.statusChip)
         sheetSummary = findViewById(R.id.sheetSummary)
         sheetDetail = findViewById(R.id.sheetDetail)
+        loadingOverlay = findViewById(R.id.loadingOverlay)
         pipeline = DrPipeline(this, useGravity = true)  // raw Android IMU keeps gravity
         logger = CsvLogger(this)
         offline = OfflineRegionManager(this, STYLE_URL)
@@ -108,9 +111,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             map.uiSettings.isCompassEnabled = true
             map.uiSettings.isLogoEnabled = false
             map.uiSettings.isAttributionEnabled = true
-            // default to Delhi until GNSS fixes
+            // default to Delhi until GNSS fixes — will be overridden by first fix below
             map.cameraPosition = org.maplibre.android.camera.CameraPosition.Builder()
                 .target(LatLng(28.6139, 77.2090)).zoom(11.0).build()
+            tryHideLoading()
         }
 
         findViewById<FloatingActionButton>(R.id.btnLocate).setOnClickListener {
@@ -134,6 +138,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         requestPermissions()
         startSensors()
         startLocation()
+        // Auto-hide loading after 3s even without GPS (indoors) — map is usable
+        lifecycleScope.launch {
+            delay(3000)
+            if (!firstFixDone) {
+                firstFixDone = true
+                tryHideLoading()
+            }
+        }
+        // Tap loading to dismiss
+        findViewById<android.view.View>(R.id.loadingOverlay)?.setOnClickListener {
+            firstFixDone = true
+            tryHideLoading()
+        }
 
         // 10Hz engine ticker: fuse, integrate dead-reckoning pose, refresh UI
         lifecycleScope.launch(Dispatchers.Default) {
@@ -218,7 +235,34 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
+    private fun tryHideLoading() {
+        if (firstFixDone && mapReady) {
+            loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
+                loadingOverlay?.visibility = android.view.View.GONE
+            }?.start()
+        }
+    }
+
     private fun startLocation() {
+        // Try last known location first — instant center while waiting for fresh fix
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            locationClient.lastLocation.addOnSuccessListener { loc ->
+                if (loc != null) {
+                    lastGnssLat = loc.latitude; lastGnssLon = loc.longitude
+                    if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
+                        pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
+                    }
+                    val target = LatLng(loc.latitude, loc.longitude)
+                    if (mapReady) {
+                        mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(target, 15.0)) }
+                    } else {
+                        pendingCenter = target
+                    }
+                    firstFixDone = true
+                    tryHideLoading()
+                }
+            }
+        }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
         val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000).build()
         try {
@@ -229,7 +273,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     pipeline.seamless.onFix(System.nanoTime() / 1_000_000)
                     if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
                         pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
-                        // first fix — center map
+                    }
+                    // Always recenter on first few fixes until loading is gone
+                    if (!firstFixDone) {
+                        firstFixDone = true
+                        tryHideLoading()
                         if (mapReady) {
                             mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 16.0)) }
                         } else {

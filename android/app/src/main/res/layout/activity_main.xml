@@ -70,4 +70,47 @@
             android:textColor="#5F6368"
             android:visibility="visible" />
     </LinearLayout>
+
+    <!-- Loading overlay — covers map until first fix + style ready -->
+    <FrameLayout
+        android:id="@+id/loadingOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#F2F0EEE6"
+        android:clickable="true"
+        android:focusable="true"
+        android:elevation="16dp">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <com.google.android.material.progressindicator.CircularProgressIndicator
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:indeterminate="true"
+                app:indicatorSize="48dp"
+                app:trackThickness="4dp" />
+
+            <TextView
+                android:id="@+id/loadingText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="Getting location…"
+                android:textAppearance="?attr/textAppearanceTitleMedium"
+                android:textColor="#1B1B1B" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="Starting sensors &amp; map"
+                android:textAppearance="?attr/textAppearanceBodyMedium"
+                android:textColor="#5F6368" />
+        </LinearLayout>
+    </FrameLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
