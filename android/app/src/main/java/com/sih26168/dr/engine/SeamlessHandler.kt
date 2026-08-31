@@ -18,10 +18,10 @@ class SeamlessHandler(
 
     private var lastFixElapsedMs: Long = 0
     private var reacquireStartMs: Long = -1
-    private var nowMs = 0
+    private var nowMs: Long = 0
 
     fun onFix(nowElapsedMs: Long) {
-        nowMs = nowElapsedMs.toInt()
+        nowMs = nowElapsedMs
         if (mode == Mode.INS) {
             reacquireStartMs = nowMs   // start soft-blend
             mode = Mode.GNSS

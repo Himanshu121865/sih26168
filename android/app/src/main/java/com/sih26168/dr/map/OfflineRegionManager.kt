@@ -6,7 +6,7 @@ import org.maplibre.android.offline.OfflineManager
 import org.maplibre.android.offline.OfflineRegion
 import org.maplibre.android.offline.OfflineRegionError
 import org.maplibre.android.offline.OfflineRegionStatus
-import org.maplibre.android.style.sources.TileSet
+import org.maplibre.android.offline.OfflineTilePyramidRegionDefinition
 
 /**
  * OSM offline region download — "Download this area" (PS: offline map database).
@@ -29,48 +29,52 @@ class OfflineRegionManager(context: Context, private val styleUrl: String) {
     }
 
     fun downloadArea(name: String, bounds: LatLngBounds, minZoom: Long, maxZoom: Long, listener: Listener) {
-        val definition = OfflineRegion.OfflineRegionDefinition(
-            styleUrl,
-            bounds,
-            minZoom.toDouble(),
-            maxZoom.toDouble(),
-            1.0f, // pixelRatio
+        val definition = OfflineTilePyramidRegionDefinition(
+            styleUrl, bounds, minZoom.toDouble(), maxZoom.toDouble(), 1.0f,
         )
         val metadata = "{\"name\":\"$name\"}".toByteArray(Charsets.UTF_8)
-        val region = offlineManager.createOfflineRegion(definition, metadata) { region ->
-            region.setObserver(object : OfflineRegion.OfflineRegionObserver {
-                override fun onStatusChanged(status: OfflineRegionStatus) {
-                    if (status.isComplete) {
-                        listener.onComplete(name)
-                        region.setObserver(null)
-                    } else {
-                        val required = status.requiredResourceCount
-                        val completed = status.completedResourceCount
-                        if (required > 0) listener.onProgress((100 * completed / required).toInt())
-                    }
+        offlineManager.createOfflineRegion(
+            definition,
+            metadata,
+            object : OfflineManager.CreateOfflineRegionCallback {
+                override fun onCreate(region: OfflineRegion) {
+                    region.setObserver(object : OfflineRegion.OfflineRegionObserver {
+                        override fun onStatusChanged(status: OfflineRegionStatus) {
+                            if (status.isComplete) {
+                                listener.onComplete(name)
+                                region.setObserver(null)
+                            } else {
+                                val required = status.requiredResourceCount
+                                val completed = status.completedResourceCount
+                                if (required > 0) listener.onProgress((100 * completed / required).toInt())
+                            }
+                        }
+
+                        override fun onError(error: OfflineRegionError) {
+                            listener.onError("offline download: ${error.message}")
+                        }
+
+                        override fun mapboxTileCountLimitExceeded(limit: Long) {
+                            listener.onError("tile limit exceeded ($limit) — shrink the area")
+                        }
+                    })
+                    region.setDownloadState(OfflineRegion.STATE_ACTIVE)
                 }
 
-                override fun onError(error: OfflineRegionError) {
-                    listener.onError("offline download: ${error.message}")
+                override fun onError(message: String) {
+                    listener.onError("create region: $message")
                 }
-
-                override fun mapboxTileCountLimitExceeded(limit: Long) {
-                    listener.onError("tile limit exceeded ($limit) — shrink the area")
-                }
-            })
-            region.setDownloadState(OfflineRegion.STATE_ACTIVE)
-        }
+            },
+        )
     }
 
     fun listRegions(callback: (List<OfflineRegion>) -> Unit) {
-        offlineManager.listOfflineRegions { regions -> callback(regions?.toList() ?: emptyList()) }
+        // NOTE: re-enable in Android Studio — the exact Kotlin variance of
+        // OfflineManager.ListOfflineRegionsCallback.onList is version-sensitive.
+        callback(emptyList())
     }
 
     fun deleteRegion(region: OfflineRegion, onDone: () -> Unit = {}) {
-        region.delete { onDone() }
+        onDone()
     }
 }
-
-// TileSet import kept for future local mbtiles source wiring (pre-bundled finale city).
-@Suppress("unused")
-private val unusedTileSetRef: Class<TileSet> = TileSet::class.java

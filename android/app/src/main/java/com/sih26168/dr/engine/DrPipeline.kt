@@ -24,8 +24,10 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     private var matcher: HmmMapMatcher? = null
 
     var mode: SeamlessHandler.Mode = SeamlessHandler.Mode.GNSS; private set
-    var lat = 0.0; var lon = 0.0; private set
-    var lastSnappedLat = 0.0; var lastSnappedLon = 0.0; private set
+    var lat = 0.0
+    var lon = 0.0
+    var lastSnappedLat = 0.0
+    var lastSnappedLon = 0.0
 
     /** Wire the offline road graph when available (bundled asset or extracted). */
     fun setRoadGraph(g: RoadGraph?) {

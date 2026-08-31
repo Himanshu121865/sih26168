@@ -179,9 +179,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun updateUi(gnssLat: Double, gnssLon: Double) {
         val v = lastV
+        val mode = pipeline.mode
         distTraveled += v * 0.1
         runOnUiThread {
-            val mode = pipeline.mode
             statusChip.text = getString(
                 when (mode) {
                     com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS -> R.string.mode_gnss
@@ -204,7 +204,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 distTraveled.toFloat(),
             )
             track.add(Point.fromLngLat(gnssLon, gnssLat))
-            source?.setGeoJson(FeatureCollection.from(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
+            source?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
         }
         logger.log(
             (System.currentTimeMillis() - tStart) / 1000.0,

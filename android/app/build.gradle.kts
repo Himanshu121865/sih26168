@@ -34,7 +34,7 @@ tasks.register<Copy>("copyModelAssets") {
     from(rootProject.file("../model.tflite"))
     from(rootProject.file("../scaler.json"))
     if (rootProject.file("../python/hmm/road_graph.json").exists()) {
-        from(rootProject.file("../python/hmm/road_graph.json")) { into "maps" }
+        from(rootProject.file("../python/hmm/road_graph.json")) { into("maps") }
     }
     into("src/main/assets")
 }
