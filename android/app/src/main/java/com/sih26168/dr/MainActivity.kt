@@ -138,18 +138,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         requestPermissions()
         startSensors()
         startLocation()
-        // Auto-hide loading after 3s even without GPS (indoors) — map is usable
+        // Auto-hide loading after 3s even without GPS/style (indoors/offline) — map is usable
         lifecycleScope.launch {
             delay(3000)
-            if (!firstFixDone) {
-                firstFixDone = true
-                tryHideLoading()
-            }
+            forceHideLoading()
         }
-        // Tap loading to dismiss
+        // Tap loading to dismiss immediately
         findViewById<android.view.View>(R.id.loadingOverlay)?.setOnClickListener {
-            firstFixDone = true
-            tryHideLoading()
+            forceHideLoading()
         }
 
         // 10Hz engine ticker: fuse, integrate dead-reckoning pose, refresh UI
@@ -241,6 +237,13 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 loadingOverlay?.visibility = android.view.View.GONE
             }?.start()
         }
+    }
+
+    private fun forceHideLoading() {
+        loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
+            loadingOverlay?.visibility = android.view.View.GONE
+        }?.start()
+        firstFixDone = true
     }
 
     private fun startLocation() {
