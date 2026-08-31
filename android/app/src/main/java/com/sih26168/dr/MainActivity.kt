@@ -246,9 +246,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun updateUi(gnssLat: Double, gnssLon: Double) {
+        // Filter invalid 0,0 (Null Island near Nigeria) from initial pipeline 0,0 before first fix
+        val isValidFix = !(gnssLat == 0.0 && gnssLon == 0.0) && gnssLat.isFinite() && gnssLon.isFinite() && kotlin.math.abs(gnssLat) > 0.1
         val v = lastV
         val mode = pipeline.mode
-        distTraveled += v * 0.1
+        if (isValidFix) distTraveled += v * 0.1
         runOnUiThread {
             statusChip.text = getString(
                 when (mode) {
@@ -272,8 +274,16 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 pipeline.lean.pBike.toFloat(),
                 distTraveled.toFloat(),
             )
-            track.add(Point.fromLngLat(gnssLon, gnssLat))
-            source?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
+            if (isValidFix) {
+                // Drop initial 0,0 if it slipped in, and avoid duplicate last point
+                if (track.isNotEmpty() && track[0].longitude() == 0.0 && track[0].latitude() == 0.0) track.removeAt(0)
+                if (track.isEmpty() || track.last().longitude() != gnssLon || track.last().latitude() != gnssLat) {
+                    track.add(Point.fromLngLat(gnssLon, gnssLat))
+                    // keep last 500 points to avoid memory bloat
+                    if (track.size > 500) track.removeAt(0)
+                }
+                source?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
+            }
         }
         logger.log(
             (System.currentTimeMillis() - tStart) / 1000.0,
