@@ -43,8 +43,8 @@ import kotlin.math.sqrt
 class MainActivity : AppCompatActivity(), SensorEventListener {
 
     companion object {
-        // Free OSM raster style (no API key). Swap for a local/offline style at the finale.
-        const val STYLE_URL = "https://demotiles.maplibre.org/style.json"
+        // Detailed OSM vector style, no key, works offline after download.
+        const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         const val PERMISSIONS = 1001
     }
 
@@ -62,6 +62,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var tStart = 0L
     private var distTraveled = 0.0
     private var lastV = 0.0
+    private var lastGnssLat: Double? = null
+    private var lastGnssLon: Double? = null
+    private var mapReady = false
+    private var pendingCenter: LatLng? = null
 
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
 
@@ -80,23 +84,50 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         mapView = findViewById(R.id.mapView)
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { map ->
-            map.setStyle(Style.Builder().fromUri(STYLE_URL)) { style ->
-                source = GeoJsonSource("dr-track")
-                style.addSource(source!!)
-                style.addLayer(
-                    LineLayer("track-layer", "dr-track")
-                        .withProperties(
-                            org.maplibre.android.style.layers.PropertyFactory.lineColor("#1A73E8"),
-                            org.maplibre.android.style.layers.PropertyFactory.lineWidth(5f),
-                        )
-                )
-            }
+            map.setStyle(Style.Builder().fromUri(STYLE_URL), object : Style.OnStyleLoaded {
+                override fun onStyleLoaded(style: Style) {
+                    mapReady = true
+                    source = GeoJsonSource("dr-track")
+                    style.addSource(source!!)
+                    style.addLayer(
+                        LineLayer("track-layer", "dr-track")
+                            .withProperties(
+                                org.maplibre.android.style.layers.PropertyFactory.lineColor("#1A73E8"),
+                                org.maplibre.android.style.layers.PropertyFactory.lineWidth(5f),
+                            )
+                    )
+                    pendingCenter?.let {
+                        map.animateCamera(CameraUpdateFactory.newLatLngZoom(it, 16.0))
+                        pendingCenter = null
+                    }
+                    // initial text now that map is ready
+                    sheetDetail.visibility = android.view.View.VISIBLE
+                    sheetDetail.text = getString(R.string.detail_line, 0f, 0f, 0f)
+                }
+            })
             map.uiSettings.isCompassEnabled = true
+            map.uiSettings.isLogoEnabled = false
+            map.uiSettings.isAttributionEnabled = true
+            // default to Delhi until GNSS fixes
+            map.cameraPosition = org.maplibre.android.camera.CameraPosition.Builder()
+                .target(LatLng(28.6139, 77.2090)).zoom(11.0).build()
         }
 
         findViewById<FloatingActionButton>(R.id.btnLocate).setOnClickListener {
-            mapView.getMapAsync { map ->
-                map.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(pipeline.lat, pipeline.lon), 17.0))
+            val target = when {
+                lastGnssLat != null && lastGnssLon != null -> LatLng(lastGnssLat!!, lastGnssLon!!)
+                pipeline.lat != 0.0 || pipeline.lon != 0.0 -> LatLng(pipeline.lat, pipeline.lon)
+                else -> null
+            }
+            if (target != null) {
+                if (mapReady) {
+                    mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(target, 16.0), 600) }
+                } else {
+                    pendingCenter = target
+                    Toast.makeText(this, "Map loading…", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(this, "No fix yet — move outdoors", Toast.LENGTH_SHORT).show()
             }
         }
         findViewById<FloatingActionButton>(R.id.btnDownload).setOnClickListener { downloadVisibleArea() }
@@ -129,10 +160,36 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun requestPermissions() {
-        val needed = listOf(Manifest.permission.ACCESS_FINE_LOCATION).filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        val needed = listOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        ).filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (needed.isNotEmpty()) {
+            if (needed.any { ActivityCompat.shouldShowRequestPermissionRationale(this, it) }) {
+                Toast.makeText(this, "Location needed for navigation + map", Toast.LENGTH_LONG).show()
+            }
+            ActivityCompat.requestPermissions(this, needed.toTypedArray(), PERMISSIONS)
+        } else {
+            statusChip.text = getString(R.string.mode_gnss)
         }
-        if (needed.isNotEmpty()) ActivityCompat.requestPermissions(this, needed.toTypedArray(), PERMISSIONS)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSIONS) {
+            val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            if (granted) {
+                Toast.makeText(this, "Location granted — starting GNSS", Toast.LENGTH_SHORT).show()
+                startLocation()
+                // center once we have a fix
+                lastGnssLat?.let { lat -> lastGnssLon?.let { lon ->
+                    mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16.0)) }
+                }}
+            } else {
+                Toast.makeText(this, "Location denied — map will be offline only", Toast.LENGTH_LONG).show()
+                statusChip.text = "No location perm"
+            }
+        }
     }
 
     private fun startSensors() {
@@ -163,18 +220,30 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun startLocation() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return
         val req = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 1000).build()
-        locationClient.requestLocationUpdates(req, object : LocationCallback() {
-            override fun onLocationResult(result: LocationResult) {
-                val loc = result.lastLocation ?: return
-                pipeline.seamless.onFix(System.nanoTime() / 1_000_000)
-                if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
-                    pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
+        try {
+            locationClient.requestLocationUpdates(req, object : LocationCallback() {
+                override fun onLocationResult(result: LocationResult) {
+                    val loc = result.lastLocation ?: return
+                    lastGnssLat = loc.latitude; lastGnssLon = loc.longitude
+                    pipeline.seamless.onFix(System.nanoTime() / 1_000_000)
+                    if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
+                        pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
+                        // first fix — center map
+                        if (mapReady) {
+                            mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 16.0)) }
+                        } else {
+                            pendingCenter = LatLng(loc.latitude, loc.longitude)
+                        }
+                    }
+                    loc.bearing.toDouble().let { pipeline.alignment.updateGnssHeading(Math.toRadians(it), loc.speed.toDouble()) }
+                    updateUi(loc.latitude, loc.longitude)
                 }
-                loc.bearing.toDouble().let { pipeline.alignment.updateGnssHeading(Math.toRadians(it), loc.speed.toDouble()) }
-                updateUi(loc.latitude, loc.longitude)
-            }
-        }, mainLooper)
+            }, mainLooper)
+        } catch (e: SecurityException) {
+            Toast.makeText(this, "Location permission missing", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun updateUi(gnssLat: Double, gnssLon: Double) {
@@ -195,7 +264,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 }
             )
             val pos = pipeline.ekf.position()
-            val sigma = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2])  // |p| = DR drift from start
+            val rawSigma = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2])
+            val sigma = if (rawSigma.isFinite()) rawSigma else 0.0  // EKF can be NaN before first GPS
             sheetSummary.text = getString(R.string.summary_line, v.toFloat(), sigma.toFloat())
             sheetDetail.text = getString(
                 R.string.detail_line,

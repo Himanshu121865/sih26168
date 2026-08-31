@@ -28,6 +28,7 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     var lon = 0.0
     var lastSnappedLat = 0.0
     var lastSnappedLon = 0.0
+    var lastV = 0.0; private set
 
     /** Wire the offline road graph when available (bundled asset or extracted). */
     fun setRoadGraph(g: RoadGraph?) {
@@ -49,26 +50,27 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
         if (avnet.push(norm)) {
             // new v_pred available — propagate one 0.1s step with the latest sample
             ekf.propagate(gyro, acc, dt)
-            val v = max(avnet.vPred.toDouble(), 0.0)
-            val (vLat, rScale) = lean.nhc(v, lean.pBike > 0.5)
-            val zuptActive = zupt.update(acc, gyro, dt, v) || v < 0.3
+            val rawV = max(avnet.vPred.toDouble(), 0.0)
+            val (vLatRaw, rScale) = lean.nhc(rawV, lean.pBike > 0.5)
+            // ZUPT: check IMU variance only, not rawV (which hallucinates 5.5 when still) — fixes table still
+            val imuStill = zupt.update(acc, gyro, dt, null)
+            val zuptActive = imuStill || rawV < 0.3
+            val v = if (zuptActive) 0.0 else rawV
+            val vLat = if (zuptActive) 0.0 else vLatRaw
             val rFwd = if (zuptActive) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
-            val z = doubleArrayOf(if (zuptActive) 0.0 else v, vLat, 0.0)
+            val z = doubleArrayOf(v, vLat, 0.0)
             val r = doubleArrayOf(rFwd, rFwd * rScale, 25.0)
             ekf.updateVelocity(z, r)
+            lastV = v
         }
     }
 
-    /** 10Hz fusion tick: propagate + velocity/NHC/ZUPT update. Returns v_fwd. */
+    /** 10Hz fusion tick: propagate + velocity/NHC/ZUPT update. Returns v_fwd (ZUPT-corrected). */
     fun onFusionTick(dt: Double, gnssSpeed: Double?, gnssCourseRad: Double?): Double {
         mode = seamless.tick((dt * 1000).toInt())
         gnssCourseRad?.let { gnssSpeed?.let { s -> alignment.updateGnssHeading(it, s) } }
-
-        // engine loop propagates inside the 100Hz IMU callback in production;
-        // at this tick we propagate one averaged step for the replay harness.
-        // (MainActivity wires per-sample propagation.)
-        val v = max(avnet.vPred.toDouble(), 0.0)
-        return v
+        // Return last ZUPT-corrected v from onImu (0.0 when still on table)
+        return lastV
     }
 
     /** After ekf.updateVelocity, call to emit pose + map snap. */
