@@ -55,7 +55,7 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             ekf.propagate(gyro, acc, dt)
             val rawV = max(avnet.vPred.toDouble(), 0.0)
             val (vLatRaw, rScale) = lean.nhc(rawV, lean.pBike > 0.5)
-            // ZUPT: IMU variance + small-motion deadband + table-vs-vehicle gate
+            // ZUPT: IMU variance + small-motion deadband + table-vs-vehicle + pure-rotation gate
             val linAccMag = Math.sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2])
             val gyroMag = Math.sqrt(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2])
             val imuStill = zupt.update(acc, gyro, dt, null)
@@ -63,9 +63,11 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             // Table detection: phone flat on table (acc Z ~9.81, tilt <15°) is not vehicle — clamp
             val isFlatOnTable = Math.abs(acc[2]) > 8.5 && Math.abs(acc[0]) < 2.0 && Math.abs(acc[1]) < 2.0 && Math.abs(lean.phi) < Math.toRadians(15.0)
             val isTableSlide = isFlatOnTable && linAccMag < 2.0
-            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion || isTableSlide
-            // also clamp rawV that is implausibly high for small motion / table
-            val vClamped = if ((isSmallMotion || isTableSlide) && rawV > 2.0) 0.0 else rawV
+            // Pure rotation (phone spun on table, not driving): high gyro but low linear acc → not forward motion
+            val isPureRotation = gyroMag > 0.8 && linAccMag < 0.8
+            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion || isTableSlide || isPureRotation
+            // also clamp rawV that is implausibly high for small motion / rotation / table
+            val vClamped = if ((isSmallMotion || isTableSlide || isPureRotation) && rawV > 2.0) 0.0 else rawV
             val v = if (zuptActive) 0.0 else vClamped
             val vLat = if (zuptActive) 0.0 else vLatRaw
             val rFwd = if (zuptActive) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
