@@ -148,21 +148,31 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             forceHideLoading()
         }
 
-        // 10Hz engine ticker: fuse, integrate dead-reckoning pose, refresh UI
+        // 10Hz engine ticker: fuse; integrate DR ONLY during GNSS loss; refresh UI.
         lifecycleScope.launch(Dispatchers.Default) {
             while (true) {
                 delay(100)
                 val dt = 0.1
                 lastV = pipeline.onFusionTick(dt, null, null)
-                val course = pipeline.alignment.yawGnss
-                if (course != null) {
-                    val d = pipeline.ekf.forwardSpeed() * dt
-                    val latR = Math.toRadians(pipeline.lat)
-                    pipeline.lat += Math.toDegrees(d * kotlin.math.cos(course) / 6371000.0)
-                    pipeline.lon += Math.toDegrees(d * kotlin.math.sin(course) /
-                        (6371000.0 * kotlin.math.cos(latR)))
+                val v = lastV
+                val mode = pipeline.mode
+                // Dead-reckon position only when GNSS is actually gone (INS mode).
+                if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.INS) {
+                    val course = pipeline.alignment.yawGnss
+                    if (course != null && v > 0.22) {
+                        val d = v * dt
+                        val latR = Math.toRadians(pipeline.lat)
+                        pipeline.lat += Math.toDegrees(d * kotlin.math.cos(course) / 6371000.0)
+                        pipeline.lon += Math.toDegrees(d * kotlin.math.sin(course) /
+                            (6371000.0 * kotlin.math.cos(latR)))
+                    }
                 }
-                updateUi(pipeline.lat, pipeline.lon)
+                // While GNSS is live, show the GPS position — never the drifted DR estimate.
+                val uiLat = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLat != null)
+                    lastGnssLat!! else pipeline.lat
+                val uiLon = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLon != null)
+                    lastGnssLon!! else pipeline.lon
+                updateUi(uiLat, uiLon)
             }
         }
 

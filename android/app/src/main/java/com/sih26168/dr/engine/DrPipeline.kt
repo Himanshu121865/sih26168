@@ -16,7 +16,7 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     val avnet = AVNetInference(context)
     val lean = LeanDetector()
     val zupt = ZuptDetector()
-    val ekf = InEKFEngine(useGravity = useGravity)
+    val ekf = InEKFEngine(useGravity = false)   // we feed gravity-removed linear acc; engine must NOT add G again
     val alignment = AlignmentEngine()
     val seamless = SeamlessHandler()
 
@@ -29,6 +29,20 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     var lastSnappedLat = 0.0
     var lastSnappedLon = 0.0
     var lastV = 0.0; private set
+    /** Rate-limited + debounced forward speed used for DR. Exposed for UI/position. */
+    val smoothedV: Double get() = velSmooth
+
+    companion object {
+        const val ZUPT_HOLD_MS = 1300.0             // hold v=0 this long after any gate fires
+        const val MOTION_CONFIRM_MS = 500.0        // sustained un-gated motion before trusting model
+        const val V_DEADBAND = 0.22               // m/s — below this, don't move position
+        const val V_STEP_LIMIT = 0.35          // max |Δv| per 0.1s tick (~3.5 m/s^2)
+        const val V_SMOOTH_ALPH = 0.15          // ~0.8s low-pass at 10Hz (1-exp(-0.1/0.8))
+    }
+    private var velSmooth = 0.0
+    private var lastModelV = 0.0
+    private var motionConfirmMs = 0.0
+    private var zuptHoldMsRem = 0.0
 
     /** Wire the offline road graph when available (bundled asset or extracted). */
     fun setRoadGraph(g: RoadGraph?) {
@@ -51,29 +65,53 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             norm,
         )
         if (avnet.push(norm)) {
-            // new v_pred available — propagate one 0.1s step with the latest sample
-            ekf.propagate(gyro, acc, dt)
-            val rawV = max(avnet.vPred.toDouble(), 0.0)
-            val (vLatRaw, rScale) = lean.nhc(rawV, lean.pBike > 0.5)
-            // ZUPT + table/hand gates — 2cm table move must be 0
+            // ~ every 0.1s. ZUPT + table/hand gates — a 2cm table nudge must be 0 m of travel.
             val linAccMag = Math.sqrt(linAcc[0]*linAcc[0] + linAcc[1]*linAcc[1] + linAcc[2]*linAcc[2])
             val gyroMag = Math.sqrt(gyro[0]*gyro[0] + gyro[1]*gyro[1] + gyro[2]*gyro[2])
             val imuStill = zupt.update(acc, gyro, dt, null)
-            // Flat on table = any motion is table, not vehicle — use low-pass gEst (stable) not raw acc
+            // Flat on table: any motion is table, not vehicle (low-pass gEst is stable).
             val isFlatOnTable = Math.abs(g[2]) > 7.5
             val isSmallMotion = linAccMag < 1.0 && gyroMag < 0.5
             val isPureRotation = gyroMag > 0.8 && linAccMag < 0.8
             val isVerticalShake = Math.abs(linAcc[2]) > 2.0 && Math.abs(linAcc[0]) < 1.5 && Math.abs(linAcc[1]) < 1.5
-            // Lateral slide on table (left/right): Y dominates, should not be forward
             val isLateralTableSlide = isFlatOnTable && Math.abs(linAcc[1]) > 1.0 && Math.abs(linAcc[1]) > Math.abs(linAcc[0])
-            val zuptActive = imuStill || rawV < 0.3 || isSmallMotion || isFlatOnTable || isPureRotation || isVerticalShake || isLateralTableSlide
-            val isNonDriving = isSmallMotion || isFlatOnTable || isPureRotation || isVerticalShake || isLateralTableSlide
-            val vClamped = if (isNonDriving && rawV > 1.0) 0.0 else rawV
-            val v = if (zuptActive) 0.0 else vClamped
-            val vLat = if (zuptActive) 0.0 else vLatRaw
-            val rFwd = if (zuptActive) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
-            val z = doubleArrayOf(v, vLat, 0.0)
-            val r = doubleArrayOf(rFwd, rFwd * rScale, 25.0)
+            val gate = imuStill || isFlatOnTable || isSmallMotion || isPureRotation || isVerticalShake || isLateralTableSlide
+
+            val rawV = max(avnet.vPred.toDouble(), 0.0)
+
+            // 1) Debounce: require sustained un-gated motion before trusting the model
+            if (gate) {
+                motionConfirmMs = 0.0
+            } else if (motionConfirmMs < MOTION_CONFIRM_MS) {
+                motionConfirmMs += 100.0
+            }
+            val trustModel = motionConfirmMs >= MOTION_CONFIRM_MS
+
+            // 2) While gated (or just after), hold v = 0 for ZUPT_HOLD_MS so recovery doesn't spike
+            if (gate) zuptHoldMsRem = ZUPT_HOLD_MS
+            val vSourced = if (trustModel && zuptHoldMsRem <= 0) rawV else 0.0
+
+            // 3) Rate-limit: a vehicle can't jerk 0 -> 10 m/s inside 100ms
+            val step = (vSourced - lastModelV).coerceIn(-V_STEP_LIMIT, V_STEP_LIMIT)
+            lastModelV += step
+
+            // 4) Low-pass (a few hundred ms) to kill remaining transients
+            velSmooth += V_SMOOTH_ALPH * (lastModelV - velSmooth)
+
+            // 5) Arm motion only if it's a real deadband-crossing hold-0 tail
+            if (zuptHoldMsRem > 0) zuptHoldMsRem -= 100
+
+            val v = if (velSmooth > V_DEADBAND) velSmooth else 0.0
+            val vLatRaw = lean.nhc(v, lean.pBike > 0.5).first
+            val moving = v > 0.0
+            val rFwd = if (!moving || gate) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }
+
+            // Propagate with LINEAR acc (gravity already removed) — avoids the 9.8·sin(θ) attitude leak.
+            // Skip propagation while gated/stationary to stop noise being integrated into position.
+            if (!gate) ekf.propagate(gyro, linAcc, dt)
+
+            val z = doubleArrayOf(v, vLatRaw, 0.0)
+            val r = doubleArrayOf(rFwd, rFwd, 25.0)
             ekf.updateVelocity(z, r)
             lastV = v
         }
