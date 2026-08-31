@@ -130,7 +130,6 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 Toast.makeText(this, "No fix yet — move outdoors", Toast.LENGTH_SHORT).show()
             }
         }
-        findViewById<FloatingActionButton>(R.id.btnDownload).setOnClickListener { downloadVisibleArea() }
 
         requestPermissions()
         startSensors()
