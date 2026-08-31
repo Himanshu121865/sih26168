@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.coordinatorlayout.widget.CoordinatorLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?android:colorBackground">
+
+    <org.maplibre.android.maps.MapView
+        android:id="@+id/mapView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!-- Status chip, top-left, Maps-style -->
+    <TextView
+        android:id="@+id/statusChip"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="40dp"
+        android:layout_marginStart="16dp"
+        android:paddingHorizontal="14dp"
+        android:paddingVertical="7dp"
+        android:background="@drawable/bg_status_chip"
+        android:text="@string/mode_gnss"
+        android:textAppearance="?attr/textAppearanceLabelMedium"
+        android:textColor="#1B1B1B"
+        android:elevation="4dp" />
+
+    <!-- FAB stack, bottom-right above sheet -->
+    <LinearLayout
+        android:id="@+id/fabStack"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="72dp"
+        android:orientation="vertical">
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnDownload"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:contentDescription="@string/download_area"
+            android:src="@android:drawable/ic_menu_save"
+            app:fabSize="mini" />
+
+        <com.google.android.material.floatingactionbutton.FloatingActionButton
+            android:id="@+id/btnLocate"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/locate"
+            android:src="@android:drawable/ic_menu_mylocation" />
+    </LinearLayout>
+
+    <!-- Bottom sheet (Maps-style) -->
+    <LinearLayout
+        android:id="@+id/bottomSheet"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@drawable/bg_bottom_sheet"
+        android:elevation="8dp"
+        android:orientation="vertical"
+        android:paddingHorizontal="20dp"
+        android:paddingTop="14dp"
+        android:paddingBottom="24dp">
+
+        <TextView
+            android:id="@+id/sheetSummary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/speed_placeholder"
+            android:textAppearance="?attr/textAppearanceTitleMedium"
+            android:textColor="#1B1B1B" />
+
+        <TextView
+            android:id="@+id/sheetDetail"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/speed_placeholder"
+            android:textAppearance="?attr/textAppearanceBodyMedium"
+            android:textColor="#5F6368"
+            android:visibility="gone" />
+    </LinearLayout>
+</androidx.coordinatorlayout.widget.CoordinatorLayout>

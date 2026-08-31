@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Navigation</string>
+    <string name="mode_gnss">GNSS</string>
+    <string name="mode_ins">INS</string>
+    <string name="mode_fused">Fused</string>
+    <string name="locate">My location</string>
+    <string name="download_area">Download this area</string>
+    <string name="offline_areas">Offline areas</string>
+    <string name="downloading">Downloading…</string>
+    <string name="speed_placeholder">–</string>
+    <string name="logging_on">Logging on</string>
+    <string name="logging_off">Logging off</string>
+    <string name="summary_line">%1$.1f m/s · drift est ±%2$.1f m</string>
+    <string name="detail_line">lean %1$.0f° · bike %2$.0f%% · trip %3$.0f m</string>
+    <string name="done">Offline area saved</string>
+</resources>
