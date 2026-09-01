@@ -315,11 +315,20 @@ def main():
     X_val_n = (X_val - mean) / std
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    np.save(out / "train_windows.npy", X_train_n.astype(np.float32))
-    np.save(out / "train_v.npy", v_train.astype(np.float32))
-    np.save(out / "val_windows.npy", X_val_n.astype(np.float32))
-    np.save(out / "val_v.npy", v_val.astype(np.float32))
-    print(f"[save] {out}/train_windows.npy {X_train_n.shape} {out}/val_windows.npy {X_val_n.shape}")
+    # For full (822k, 3.9GB) the np.save can OOM in Colab (needs 2x RAM). Use memmap or skip npy and train streaming.
+    # We try to save, but if it fails, fall back to scaler-only + streaming mode.
+    try:
+        np.save(out / "train_windows.npy", X_train_n.astype(np.float32))
+        np.save(out / "train_v.npy", v_train.astype(np.float32))
+        np.save(out / "val_windows.npy", X_val_n.astype(np.float32))
+        np.save(out / "val_v.npy", v_val.astype(np.float32))
+        print(f"[save] {out}/train_windows.npy {X_train_n.shape} {out}/val_windows.npy {X_val_n.shape}")
+    except Exception as e:
+        print(f"[warn] np.save failed ({e}), falling back to scaler-only + streaming. Use train_avnet.py with --files mode.")
+        # save scaler already done, don't save npy, train should use streaming
+        # also save a tiny marker so train knows to use streaming
+        (out / ".streaming").touch()
+        print(f"[save] scaler only at {args.scaler}, train with streaming: python train_avnet.py --files ...")
 
 if __name__ == "__main__":
     main()
