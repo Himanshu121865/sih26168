@@ -315,29 +315,28 @@ def main():
     # For full 822k (3.9GB) we must not hold X_train and X_train_n (7.8GB) in RAM at once — stream to disk via memmap.
     # This is what OOM-killed Colab (looked like ^C).
     try:
-        # Use memmap for the big arrays to avoid 2x RAM spike.
+        # Use open_memmap for proper .npy header (np.memmap raw fails np.load with mmap_mode)
         def save_memmap(path, arr, dtype=np.float32):
-            # arr is float64 from mean/std, we cast and write chunked via memmap
             shape = arr.shape
-            # need to compute normalized array in chunks to avoid extra copy
-            # Create memmap file
-            fp = np.memmap(path, dtype=dtype, mode='w+', shape=shape)
-            # Write in chunks of 50k windows (50k*200*6*4 = 240MB per chunk)
+            # Create proper .npy via open_memmap
+            fp = np.lib.format.open_memmap(path, mode='w+', dtype=dtype, shape=shape)
             chunk = 50000
             for start in range(0, shape[0], chunk):
                 end = min(shape[0], start + chunk)
-                # X_train is still float32? Actually X_train is float32 from make_windows, but mean/std are float64
-                # Do (X - mean)/std in float32 chunked
-                chunk_arr = X_train[start:end].astype(np.float64) if path.name.startswith("train_windows") else X_val[start:end].astype(np.float64) if "val_windows" in path.name else None
+                # X_train/X_val are float32, compute (X - mean)/std chunked
+                if "train_windows" in path.name:
+                    chunk_arr = X_train[start:end].astype(np.float64)
+                elif "val_windows" in path.name:
+                    chunk_arr = X_val[start:end].astype(np.float64)
+                else:
+                    chunk_arr = None
                 if chunk_arr is None:
-                    # for v arrays, no normalize
                     chunk_arr = v_train[start:end] if "train_v" in path.name else v_val[start:end]
                     fp[start:end] = chunk_arr.astype(dtype)
                 else:
                     fp[start:end] = ((chunk_arr - mean) / std).astype(dtype)
                 del chunk_arr
-            fp.flush()
-            del fp
+            del fp  # flush via delete
 
         # For v arrays, no memmap needed (small)
         np.save(out / "train_v.npy", v_train.astype(np.float32))
