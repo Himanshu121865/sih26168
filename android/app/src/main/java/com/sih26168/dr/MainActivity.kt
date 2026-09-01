@@ -334,6 +334,10 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 Math.toDegrees(pipeline.lean.phi).toFloat(),
                 pipeline.lean.pBike.toFloat(),
                 distTraveled.toFloat(),
+                pipeline.lastRawModelV.toFloat(),
+                pipeline.avnet.sigmaV.toFloat(),
+                pipeline.lastStill,
+                pipeline.motionConfirmMsPublic,
             )
             if (isValidFix) {
                 // Drop initial 0,0 if it slipped in, and avoid duplicate last point

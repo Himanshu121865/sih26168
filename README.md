@@ -2,6 +2,28 @@
 
 **ISRO • Software • SIH26168 • Deadline: 20 Sep 2026**
 
+## Clone and Use (30 seconds)
+
+**Just want the app? No build needed:**
+
+```bash
+git clone https://github.com/Himanshu121865/sih26168.git
+cd sih26168
+adb install releases/sih26168-debug.apk   # or drag the APK to your phone
+# Open Navigation on phone → grant Location → map centers on you
+```
+
+The APK (`releases/sih26168-debug.apk` 66M, also at `android/app/build/`) already contains the trained `model.tflite` + `scaler.json`. No Python, no training needed to try it.
+
+**Build from source:**
+
+```bash
+git clone https://github.com/Himanshu121865/sih26168.git
+cd sih26168
+# Android: open android/ in Android Studio Hedgehog (JDK 17) → Run
+# Python (optional, to retrain): see "Run it" below
+```
+
 ## What this is
 
 An app that keeps telling you where you are when GPS stops working.

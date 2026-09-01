@@ -11,6 +11,6 @@
     <string name="logging_on">Logging on</string>
     <string name="logging_off">Logging off</string>
     <string name="summary_line">%1$.1f m/s · drift est ±%2$.1f m</string>
-    <string name="detail_line">lean %1$.0f° · bike %2$.0f%% · trip %3$.0f m</string>
+    <string name="detail_line">lean %1$.0f° · bike %2$.0f%% · trip %3$.0f m\nmodel %4$.1f · σ%5$.2f · still %6$s · meta %7$dms</string>
     <string name="done">Offline area saved</string>
 </resources>
