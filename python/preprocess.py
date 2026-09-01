@@ -120,17 +120,23 @@ def main():
     ap.add_argument("--train-ratio", type=float, default=0.8)
     ap.add_argument("--out", default="data/processed")
     ap.add_argument("--scaler", default="python/scaler.json")
+    ap.add_argument("--resume", action="store_true", help="resume from existing npy if interrupted (skip completed files)")
     args = ap.parse_args()
 
     base = Path("data/iovnbd/Synchronised V abd S datasets/Categorised IOVNB Dataset")
     s_files = sorted(glob.glob(str(base / "**/S-*.csv"), recursive=True))
     if args.subset == "1h":
         s_files = s_files[:3]
-    print(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz}")
+    print(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz} resume={args.resume}")
+
+    # resume: if output exists and is recent, skip (user can rm -rf data/processed to force)
+    out_path = Path(args.out)
+    if args.resume and (out_path / "train_windows.npy").exists() and (out_path / "val_windows.npy").exists():
+        print(f"[resume] {out_path}/train_windows.npy exists ({(out_path/'train_windows.npy').stat().st_size/1e9:.2f}GB), skipping preprocess. Use --no-resume or rm -rf {out_path} to force.")
+        return
 
     # split by trajectory (file), not window — prevents leakage (harsh/loaders.py:287)
     n_train_files = int(len(s_files) * args.train_ratio)
-    # deterministic by sorted order (or rng 26168)
     rng = np.random.default_rng(26168)
     perm_files = rng.permutation(len(s_files))
     train_files_idx = set(perm_files[:n_train_files])
@@ -138,10 +144,21 @@ def main():
     val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
     print(f"[split] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
 
+    # handle Ctrl-C gracefully: save what we have so far
+    import signal
+    interrupted = {"flag": False}
+    def handle_sigint(sig, frame):
+        interrupted["flag"] = True
+        print("\n[interrupt] Ctrl-C detected, will save partial progress and exit...")
+    orig_handler = signal.signal(signal.SIGINT, handle_sigint)
+
     def process_file_list(file_list):
         all_windows = []
         all_v = []
-        for f in file_list:
+        for idx_f, f in enumerate(file_list):
+            if interrupted["flag"]:
+                print(f"[interrupt] stopping after {idx_f}/{len(file_list)} files, saving partial...")
+                break
             try:
                 df = load_phone_csv(f)
                 # robust column mapping
@@ -246,8 +263,34 @@ def main():
             stationary = np.zeros(len(X), dtype=bool)
         return X, v, stationary
 
-    X_train, v_train, stat_train = process_file_list(train_files)
-    X_val, v_val, stat_val = process_file_list(val_files)
+    try:
+        X_train, v_train, stat_train = process_file_list(train_files)
+        X_val, v_val, stat_val = process_file_list(val_files)
+    finally:
+        signal.signal(signal.SIGINT, orig_handler)
+
+    if interrupted["flag"]:
+        # save partial even if val empty, so resume can detect
+        if 'X_train' in locals() and len(X_train) > 0:
+            print(f"[interrupt] saving partial train {X_train.shape} val {X_val.shape if 'X_val' in locals() and len(X_val)>0 else 'none'}")
+            # still need scaler from what we have
+            mean = X_train.mean(axis=(0,1)); std = X_train.std(axis=(0,1)) + 1e-6
+            for i in range(len(std)):
+                if std[i] < 1e-8:
+                    mean[i]=0; std[i]=1
+            scaler = {"mean": mean.tolist(), "std": std.tolist(), "hz": args.hz, "window": args.window, "stride": args.stride, "train_files": [str(Path(f).name) for f in train_files], "partial": True}
+            Path(args.scaler).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.scaler, "w") as f:
+                json.dump(scaler, f, indent=2)
+            out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
+            np.save(out / "train_windows.npy", ((X_train - mean)/std).astype(np.float32))
+            np.save(out / "train_v.npy", v_train.astype(np.float32))
+            if 'X_val' in locals() and len(X_val)>0:
+                np.save(out / "val_windows.npy", ((X_val - mean)/std).astype(np.float32))
+                np.save(out / "val_v.npy", v_val.astype(np.float32))
+            print(f"[interrupt] partial saved to {args.out}, re-run with --resume to skip or rm -rf to restart")
+        return
+
     print(f"[concat] train X {X_train.shape} v {v_train.shape} stationary {stat_train.sum()}/{len(stat_train)} | val X {X_val.shape} v {v_val.shape} stationary {stat_val.sum()}/{len(stat_val)}")
     if len(X_train) == 0 or len(X_val) == 0:
         print("[err] no windows")
