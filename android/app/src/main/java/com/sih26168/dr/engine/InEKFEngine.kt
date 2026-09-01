@@ -47,10 +47,10 @@ class InEKFEngine(useGravity: Boolean = true) {
         for (i in 0 until DIM) P[i][i] = p0[i]
     }
 
-    private val qAcc: Double = 30.0  // empirical default from 10Hz replay sweep
+    private val qAcc: Double = 0.5  // was 30.0 — caused P explosion to 3e26 when stationary (now fixed)
     private val qNoise = doubleArrayOf(
         1e-4, 1e-4, 1e-4,           // gyro ARW
-        qAcc, qAcc, qAcc,           // accel (single-sample variance scale)
+        qAcc, qAcc, qAcc,           // accel
         1e-6, 1e-6, 1e-6,           // bg walk
         1e-4, 1e-4, 1e-4,           // ba walk
         1e-8, 1e-8, 1e-8,           // R_car

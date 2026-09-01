@@ -29,6 +29,10 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     var lastSnappedLat = 0.0
     var lastSnappedLon = 0.0
     var lastV = 0.0; private set
+    /** Debug — raw model output (before gates) and last stationary decision. */
+    var lastRawModelV = 0.0; private set
+    var lastStill = false; private set
+    val motionConfirmMsPublic: Int get() = motionConfirmMs.toInt()
     /** Rate-limited + debounced forward speed used for DR. Exposed for UI/position. */
     val smoothedV: Double get() = velSmooth
 
@@ -71,6 +75,8 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             val still = zupt.update(acc, gyro, dt, null)
 
             val rawV = max(avnet.vPred.toDouble(), 0.0)
+            lastRawModelV = rawV
+            lastStill = still
 
             // Motion confirmation: model must report speed above deadband for a few
             // consecutive ticks before trusting it (kills table nudges & spikes).
