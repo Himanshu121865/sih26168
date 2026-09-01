@@ -58,6 +58,13 @@ class IOVNBDWindowDataset(Dataset):
             self.N = len(self.index)
             print(f"[dataset] streaming N={self.N} windows")
         else:
+            # Check if windows_path was provided but file missing (common after rm -rf or Ctrl-C)
+            if windows_path:
+                raise FileNotFoundError(
+                    f"Dataset not found: {windows_path} (and {v_path}). "
+                    f"Run `python python/preprocess.py --subset {'full' if 'full' in str(windows_path) else '1h'} --window {window} --stride {stride} --hz {hz}` first, "
+                    f"or use streaming mode: IOVNBDWindowDataset(files=[...])"
+                )
             raise ValueError("need windows_path or files")
 
     def __len__(self):
