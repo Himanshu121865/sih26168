@@ -311,24 +311,49 @@ def main():
         json.dump(scaler, f, indent=2)
     print(f"[scaler] {args.scaler} mean {mean} std {std}")
 
-    X_train_n = (X_train - mean) / std
-    X_val_n = (X_val - mean) / std
-
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    # For full (822k, 3.9GB) the np.save can OOM in Colab (needs 2x RAM). Use memmap or skip npy and train streaming.
-    # We try to save, but if it fails, fall back to scaler-only + streaming mode.
+    # For full 822k (3.9GB) we must not hold X_train and X_train_n (7.8GB) in RAM at once — stream to disk via memmap.
+    # This is what OOM-killed Colab (looked like ^C).
     try:
-        np.save(out / "train_windows.npy", X_train_n.astype(np.float32))
+        # Use memmap for the big arrays to avoid 2x RAM spike.
+        def save_memmap(path, arr, dtype=np.float32):
+            # arr is float64 from mean/std, we cast and write chunked via memmap
+            shape = arr.shape
+            # need to compute normalized array in chunks to avoid extra copy
+            # Create memmap file
+            fp = np.memmap(path, dtype=dtype, mode='w+', shape=shape)
+            # Write in chunks of 50k windows (50k*200*6*4 = 240MB per chunk)
+            chunk = 50000
+            for start in range(0, shape[0], chunk):
+                end = min(shape[0], start + chunk)
+                # X_train is still float32? Actually X_train is float32 from make_windows, but mean/std are float64
+                # Do (X - mean)/std in float32 chunked
+                chunk_arr = X_train[start:end].astype(np.float64) if path.name.startswith("train_windows") else X_val[start:end].astype(np.float64) if "val_windows" in path.name else None
+                if chunk_arr is None:
+                    # for v arrays, no normalize
+                    chunk_arr = v_train[start:end] if "train_v" in path.name else v_val[start:end]
+                    fp[start:end] = chunk_arr.astype(dtype)
+                else:
+                    fp[start:end] = ((chunk_arr - mean) / std).astype(dtype)
+                del chunk_arr
+            fp.flush()
+            del fp
+
+        # For v arrays, no memmap needed (small)
         np.save(out / "train_v.npy", v_train.astype(np.float32))
-        np.save(out / "val_windows.npy", X_val_n.astype(np.float32))
         np.save(out / "val_v.npy", v_val.astype(np.float32))
-        print(f"[save] {out}/train_windows.npy {X_train_n.shape} {out}/val_windows.npy {X_val_n.shape}")
+        # For windows, use memmap chunked
+        save_memmap(out / "train_windows.npy", X_train, np.float32)
+        save_memmap(out / "val_windows.npy", X_val, np.float32)
+        # Free original arrays before exit to help Colab
+        del X_train, X_val
+        import gc; gc.collect()
+        print(f"[save] {out}/train_windows.npy via memmap (no OOM)")
     except Exception as e:
-        print(f"[warn] np.save failed ({e}), falling back to scaler-only + streaming. Use train_avnet.py with --files mode.")
-        # save scaler already done, don't save npy, train should use streaming
-        # also save a tiny marker so train knows to use streaming
+        print(f"[warn] memmap save failed ({e}), falling back to scaler-only + streaming.")
+        import traceback; traceback.print_exc()
         (out / ".streaming").touch()
-        print(f"[save] scaler only at {args.scaler}, train with streaming: python train_avnet.py --files ...")
+        print(f"[save] scaler only at {args.scaler}, train with streaming")
 
 if __name__ == "__main__":
     main()
