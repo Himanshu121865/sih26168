@@ -96,7 +96,7 @@ def generate_drift_plot(val_v_path="data/processed/val_v.npy", model_path=None, 
         with torch.no_grad():
             v_pred = []
             for i in range(0, len(X_seg), 64):
-                xb = torch.from_numpy(X_seg[i:i+64])
+                xb = torch.from_numpy(np.array(X_seg[i:i+64], dtype=np.float32))  # copy: mmap non-writable
                 vp, _, _, _, _ = model(xb)
                 v_pred.append(vp.squeeze(-1).numpy())
             v_pred = np.concatenate(v_pred)
@@ -174,7 +174,7 @@ def _load_v_pred_1d(val_v_path, model_path, start, seg_len):
         with torch.no_grad():
             v_pred = []
             for i in range(0, len(X_seg), 64):
-                xb = torch.from_numpy(np.asarray(X_seg[i:i + 64]))
+                xb = torch.from_numpy(np.array(X_seg[i:i + 64], dtype=np.float32))  # copy: mmap non-writable
                 vp, _, _, _, _ = model(xb)
                 v_pred.append(vp.squeeze(-1).numpy())
             v_pred = np.concatenate(v_pred).astype(np.float64)

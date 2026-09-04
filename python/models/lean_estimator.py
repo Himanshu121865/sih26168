@@ -21,9 +21,13 @@ class LeanEstimator(nn.Module):
         self.gap = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(16, 1)
 
-    def forward(self, x, acc_raw=None):
+    def forward(self, x, acc_raw=None, scaler_mean=None, scaler_std=None):
         """
         x: (B,200,6) normalized, acc_raw: (B,200,3) unnormalized for physics (optional)
+        scaler_mean/std: (6,) arrays — denormalize first 3ch before atan2 when acc_raw absent.
+            REQUIRED for correct phi: normalized means (~0) give atan2≈±45° garbage
+            (full-run observed mean |φ|=38.4° clamped). Physical linear-acc means
+            (≈0,0,0 after gravity removal... plus residual) give true lean.
         returns: phi (B,), p_bike (B,)
         """
         if x.dim() == 3 and x.shape[1] == 200 and x.shape[2] == 6:
@@ -32,10 +36,15 @@ class LeanEstimator(nn.Module):
             x_t = x
         B = x_t.shape[0]
         # physics phi: use acc part of x (first 3 channels) mean over window
-        # if normalized, need to denorm? For now use normalized mean -> approx
-        # Better: use acc_raw if provided
+        # MUST denormalize first: normalized means (~0,0,0) give atan2(y,z)≈±45°
+        # garbage (observed 38.4° mean). Physical linear-acc gives true lean.
         if acc_raw is not None:
             acc = acc_raw  # (B,200,3)
+        elif scaler_mean is not None and scaler_std is not None:
+            acc_n = x[:, :, :3] if x.dim() == 3 and x.shape[2] == 6 else x_t.permute(0, 2, 1)[:, :, :3]
+            _m = torch.as_tensor(scaler_mean, dtype=acc_n.dtype, device=acc_n.device)[:3]
+            _s = torch.as_tensor(scaler_std, dtype=acc_n.dtype, device=acc_n.device)[:3]
+            acc = acc_n * _s.unsqueeze(0).unsqueeze(0) + _m.unsqueeze(0).unsqueeze(0)
         else:
             acc = x[:, :,:3] if x.dim()==3 and x.shape[2]==6 else x_t.permute(0,2,1)[:,:,:3]
         # acc shape (B,200,3)

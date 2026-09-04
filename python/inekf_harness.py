@@ -207,11 +207,12 @@ def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=
     lean = LeanEstimator()
     lean.eval()
     with torch.no_grad():
-        xb = torch.from_numpy(seg.astype(np.float32))
+        xb = torch.from_numpy(np.array(seg, dtype=np.float32))  # copy: mmap is non-writable
         v_pred, ls_v, _, _, _ = model(xb)
         v_pred = v_pred.squeeze(-1).numpy().astype(np.float64)
         sig_v = torch.exp(ls_v.squeeze(-1)).numpy().astype(np.float64)
-        phi_arr, p_bike_arr = lean(xb)
+        # denormalize for physics phi (normalized means give ±45° garbage)
+        phi_arr, p_bike_arr = lean(xb, scaler_mean=mean, scaler_std=std)
         phi_arr = phi_arr.numpy().astype(np.float64)
         p_bike_arr = p_bike_arr.numpy().astype(np.float64)
     if lean_mode == "bike":

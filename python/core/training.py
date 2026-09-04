@@ -99,7 +99,10 @@ def train_one_epoch(model, loader, optim, device, lambda_nll=0.1, augment_yaw=Fa
         x=x.to(device); v=v.to(device)
         if augment_yaw and random.random()<0.5:
             x=augment_random_yaw(x)
-        if augment_bike:
+        # Gate bike aug per-batch like yaw: without this, every batch shifts
+        # train distribution away from (unaugmented) val → val floor rises
+        # (full-run: train 1.17 vs val 1.77). 50% keeps robustness + parity.
+        if augment_bike and random.random()<0.5:
             x=augment_synthetic_bike(x)
         optim.zero_grad()
         v_pred, log_sig,_ ,_ ,_=model(x)
