@@ -35,6 +35,12 @@ import torch
 
 from python.models.avnet import AVNetLite
 from python.models.lean_estimator import LeanEstimator
+from python.utils.zupt import StationaryDetector
+
+# Single source of truth for Lie group math (F2): canonical impl lives in
+# python/utils/lie_group.py. Harness re-exports the same symbols so the
+# Kotlin port and any `from python.inekf_harness import skew` callers keep working.
+from python.utils.lie_group import skew, so3exp, sen3exp
 
 # ---------------------------------------------------------------- state index
 # [R_nav(0:3) | v(3:6) | p(6:9) | b_g(9:12) | b_a(12:15) | R_car(15:18) | p_car(18:21)]
@@ -48,44 +54,8 @@ G = torch.tensor([0.0, 0.0, -9.80665], dtype=torch.float64)
 # NOTE: IO-VNBD preprocessed windows contain GRAVITY-REMOVED linear acceleration,
 # so the harness replays with G disabled (use_gravity=False). Raw phone IMU on
 # Android keeps gravity and uses R0 from gravity_align_R().
-
-
-def skew(w: torch.Tensor) -> torch.Tensor:
-    return torch.stack([
-        torch.stack([torch.zeros_like(w[0]), -w[2], w[1]]),
-        torch.stack([w[2], torch.zeros_like(w[0]), -w[0]]),
-        torch.stack([-w[1], w[0], torch.zeros_like(w[0])]),
-    ])
-
-
-def so3exp(phi: torch.Tensor) -> torch.Tensor:
-    ang = torch.norm(phi)
-    if ang < 1e-10:
-        return torch.eye(3, dtype=torch.float64) + skew(phi)
-    axis = phi / ang
-    K = skew(axis)
-    return torch.eye(3, dtype=torch.float64) + torch.sin(ang) * K + (1 - torch.cos(ang)) * (K @ K)
-
-
-def sen3exp(xi: torch.Tensor):
-    """SE2(3) exp for 9D [phi(3), rho_v(3), rho_p(3)] -> (R, v, p). Exact left Jacobian."""
-    phi = xi[:3]
-    ang = torch.norm(phi)
-    K = skew(phi)
-    ang2 = ang * ang
-    if ang < 1e-10:
-        J = torch.eye(3, dtype=torch.float64) + 0.5 * K + (1.0 / 6.0) * (K @ K)
-        R = torch.eye(3, dtype=torch.float64) + K + 0.5 * (K @ K)
-    else:
-        s, c = torch.sin(ang), torch.cos(ang)
-        J = (s / ang) * torch.eye(3, dtype=torch.float64) \
-            + (1 - s / ang) * (phi.unsqueeze(1) @ phi.unsqueeze(0)) / ang2 \
-            + ((1 - c) / ang) * K
-        R = c * torch.eye(3, dtype=torch.float64) \
-            + (1 - c) * (phi.unsqueeze(1) @ phi.unsqueeze(0)) / ang2 + s * K
-    v = J @ xi[3:6]
-    p = J @ xi[6:9]
-    return R, v, p
+# NOTE (F2): skew/so3exp/sen3exp imported from python.utils.lie_group (exact
+# left Jacobian). Do NOT redefine locally — parity with Kotlin LieGroup.kt.
 
 
 def gravity_align_R(acc_mean: torch.Tensor) -> torch.Tensor:
@@ -99,12 +69,20 @@ def gravity_align_R(acc_mean: torch.Tensor) -> torch.Tensor:
     return torch.stack([x_body, y_body, z_body], dim=1)  # columns = body axes in nav
 
 class InEKF:
-    """21-DOF right-invariant EKF (improved path), float64, CPU torch."""
+    """21-DOF right-invariant EKF (improved path), float64, CPU torch.
+
+    q_acc divergence note (F3): Python default 30.0 matches the 10Hz proxy
+    replay where one tail sample per 0.1s has huge variance (optimal weight≈0).
+    Android InEKFEngine.kt uses qAcc=0.5 because live 100Hz propagation is
+    smoother and P exploded to 3e26 when stationary at 30.0 (commit 23cc3dd).
+    Pass --q-acc to sweep; log P trace to compare.
+    """
 
     BG_CLAMP = 0.5    # rad/s
     BA_CLAMP = 2.0    # m/s^2
 
     def __init__(self, R0, q_acc=30.0, use_gravity=False):
+        self.q_acc = float(q_acc)
         self.R = R0.clone()
         self.g = G.clone() if use_gravity else torch.zeros(3, dtype=torch.float64)
         self.v = torch.zeros(3, dtype=torch.float64)
@@ -204,7 +182,8 @@ def load_scaler(path="python/scaler.json"):
     return np.array(sc["mean"], dtype=np.float64), np.array(sc["std"], dtype=np.float64)
 
 
-def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=True):
+def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=True,
+               q_acc=30.0, zupt_speed_gate=0.3, use_variance_zupt=True):
     """Replay 60s outage on val segment. Returns dict of metrics."""
     mean, std = load_scaler()
     X = np.load("data/processed/val_windows.npy", mmap_mode="r")  # (N,200,6) normalized
@@ -255,19 +234,47 @@ def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=
     dist_avnet = np.cumsum(np.clip(v_pred, 0, None) * dt)
 
     # --- InEKF
-    ekf = InEKF(R0)
+    ekf = InEKF(R0, q_acc=q_acc)
     ekf.v = torch.tensor([v_gt[0], 0.0, 0.0], dtype=torch.float64)
     dist_ekf = np.zeros(n_windows)
     r_floor = 0.3 ** 2  # m/s² floor on velocity-measurement variance
+    # Variance-based stationary detector on the 10Hz proxy stream (F4).
+    # Mirrors Android DrPipeline (ZuptDetector @100Hz): low accel/gyro variance
+    # + speed gate → freeze propagate + v=0 update. At 10Hz, window_s=0.5 → 5 samples.
+    zupt_det = StationaryDetector(rate_hz=10.0) if use_variance_zupt else None
+    n_zupt = 0
     for i in range(1, n_windows):
-        ekf.propagate(torch.from_numpy(gyro_stream[i - 1]),
-                      torch.from_numpy(acc_stream[i - 1]), dt)
+        # variance ZUPT uses current sample + model speed as proxy for vehicle speed
+        still_var = False
+        if zupt_det is not None:
+            t_ns = int((start + i) * 100_000_000)  # 10Hz ticks, monotonic is enough
+            still_var = bool(zupt_det.update(
+                np.asarray(acc_stream[i]), np.asarray(gyro_stream[i]), t_ns,
+                speed_mps=float(max(float(v_pred[i]), 0.0))))
+        # legacy model-speed heuristic as fallback/OR (keeps old behavior when
+        # variance window not yet filled, e.g. first 0.5s of replay)
+        v_fwd_raw = max(float(v_pred[i]), 0.0)
+        zupt_heur = v_fwd_raw < zupt_speed_gate
+        zupt = bool(still_var or (zupt_heur and i < 5))
+        if zupt:
+            # first samples: heuristic only until detector fills; afterwards variance only
+            pass
+        if zupt_det is not None and i >= 5:
+            zupt = still_var
+        if zupt:
+            n_zupt += 1
+        # Skip propagation while stationary so accel noise isn't integrated
+        # into position (parity with DrPipeline.kt:109 `if (!still) propagate`).
+        if not zupt:
+            ekf.propagate(torch.from_numpy(gyro_stream[i - 1]),
+                          torch.from_numpy(acc_stream[i - 1]), dt)
 
         # velocity measurement from AVNet + adaptive NHC + ZUPT
-        v_fwd = max(float(v_pred[i]), 0.0)
+        # (zupt already decided above via variance detector; do NOT overwrite
+        # with model-speed heuristic — that regressed stop-go to 25%.)
+        v_fwd = v_fwd_raw
         phi = float(phi_arr[i])
         is_bike = float(p_bike_arr[i]) > 0.5
-        zupt = v_fwd < 0.3  # ZUPT: stationary → v = 0 with tight R (utils/zupt.py gate)
         v_lat = v_fwd * math.sin(phi) if (is_bike and not zupt) else 0.0
         r_scale = (1.0 + 2.0 * abs(phi)) if is_bike else 1.0
 
@@ -303,12 +310,15 @@ def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=
         "inekf_drift_pct": pct(dist_ekf),
     }
     if verbose:
-        print(f"[harness] segment {n_windows} windows (60s) total_dist {total_dist:.1f}m mode={lean_mode}")
+        print(f"[harness] segment {n_windows} windows (60s) total_dist {total_dist:.1f}m mode={lean_mode} q_acc={q_acc}")
         print(f"  naive  final {metrics['naive_final_m']:7.1f}m  {metrics['naive_drift_pct']:6.1f}%")
         print(f"  avnet  final {metrics['avnet_final_m']:7.1f}m  {metrics['avnet_drift_pct']:6.1f}%")
         print(f"  inekf  final {metrics['inekf_final_m']:7.1f}m  {metrics['inekf_drift_pct']:6.1f}%")
         print(f"  mean |v_pred-v_gt| {np.abs(v_pred - v_gt).mean():.3f} m/s | mean σ_v {sig_v.mean():.3f} "
-              f"| mean φ {np.degrees(np.abs(phi_arr)).mean():.1f}° | mean p_bike {p_bike_arr.mean():.2f}")
+              f"| mean φ {np.degrees(np.abs(phi_arr)).mean():.1f}° | mean p_bike {p_bike_arr.mean():.2f} "
+              f"| P_trace {float(torch.trace(ekf.P)):.3g} | zupt {n_zupt}/{n_windows}")
+    metrics["q_acc"] = float(q_acc)
+    metrics["n_zupt"] = int(n_zupt)
     return metrics
 
 
@@ -336,6 +346,10 @@ def main():
     ap.add_argument("--windows", type=int, default=600)
     ap.add_argument("--lean-mode", choices=["auto", "car", "bike"], default="auto")
     ap.add_argument("--start", type=int, default=None, help="window index to start segment")
+    ap.add_argument("--q-acc", type=float, default=30.0,
+                    help="accel process noise (Python 10Hz proxy default 30.0; Android live uses 0.5)")
+    ap.add_argument("--zupt-gate", type=float, default=0.3, help="v_fwd below this → ZUPT v=0 (first 5 samples fallback)")
+    ap.add_argument("--no-variance-zupt", action="store_true", help="disable variance detector, use speed heuristic only")
     ap.add_argument("--test-lean", action="store_true")
     ap.add_argument("--csv", default="reports/inekf_vs_avnet.csv")
     args = ap.parse_args()
@@ -344,7 +358,10 @@ def main():
         test_lean()
         return
 
-    metrics = run_replay(args.model, n_windows=args.windows, start=args.start, lean_mode=args.lean_mode)
+    metrics = run_replay(args.model, n_windows=args.windows, start=args.start,
+                         lean_mode=args.lean_mode, q_acc=args.q_acc,
+                         zupt_speed_gate=args.zupt_gate,
+                         use_variance_zupt=not args.no_variance_zupt)
     Path(args.csv).parent.mkdir(parents=True, exist_ok=True)
     write_header = not Path(args.csv).exists()
     with open(args.csv, "a") as f:

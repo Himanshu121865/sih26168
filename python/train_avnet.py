@@ -15,6 +15,7 @@ from torch.utils.data import DataLoader
 
 from python.datasets.iovnbd_dataset import IOVNBDWindowDataset
 from python.models.avnet import AVNetLite
+from python.core.training import augment_synthetic_bike as _bike_aug
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -30,6 +31,8 @@ def parse_args():
     ap.add_argument("--out", default="experiments/checkpoints/model_avnet_stage1.p")
     ap.add_argument("--lambda-nll", type=float, default=0.1, help="NLL weight, 0= MSE only")
     ap.add_argument("--augment-yaw", action="store_true", help="random yaw rotation (heading-agnostic)")
+    ap.add_argument("--augment-bike", action="store_true",
+                    help="synthetic bike robustness: pothole 20%% + engine 30%% + lean ±25° (F5, no real bike data yet)")
     ap.add_argument("--seed", type=int, default=42)
     return ap.parse_args()
 
@@ -83,7 +86,7 @@ def gaussian_nll_loss(v_pred, v_gt, log_sig, min_sigma=1e-3):
     nll = 0.5 * (err / sigma) ** 2 + torch.log(sigma) + 0.5 * math.log(2*math.pi)
     return nll.mean()
 
-def train_one_epoch(model, loader, optim, device, lambda_nll=0.1, augment_yaw=False):
+def train_one_epoch(model, loader, optim, device, lambda_nll=0.1, augment_yaw=False, augment_bike=False):
     model.train()
     total_loss = 0
     total_mse = 0
@@ -93,6 +96,8 @@ def train_one_epoch(model, loader, optim, device, lambda_nll=0.1, augment_yaw=Fa
         v = v.to(device)  # (B,)
         if augment_yaw and random.random() < 0.5:
             x = augment_random_yaw(x)
+        if augment_bike:
+            x = _bike_aug(x)
         optim.zero_grad()
         v_pred, log_sig_v, att_pred, log_sig_att, _ = model(x)
         v_pred_s = v_pred.squeeze(-1)  # (B,)
@@ -131,7 +136,7 @@ def main():
     if args.device=="cuda" and not torch.cuda.is_available():
         print("[warn] cuda not available, using cpu")
         device = torch.device("cpu")
-    print(f"[train] device {device} epochs {args.epochs} batch {args.batch} lr {args.lr} augment_yaw={args.augment_yaw} lambda_nll={args.lambda_nll}")
+    print(f"[train] device {device} epochs {args.epochs} batch {args.batch} lr {args.lr} augment_yaw={args.augment_yaw} augment_bike={args.augment_bike} lambda_nll={args.lambda_nll}")
 
     train_ds = IOVNBDWindowDataset(args.train_windows, args.train_v)
     val_ds = IOVNBDWindowDataset(args.val_windows, args.val_v)
@@ -150,7 +155,7 @@ def main():
 
     for epoch in range(1, args.epochs+1):
         t0 = time.time()
-        tr_loss, tr_mse = train_one_epoch(model, train_loader, optim, device, args.lambda_nll, args.augment_yaw)
+        tr_loss, tr_mse = train_one_epoch(model, train_loader, optim, device, args.lambda_nll, args.augment_yaw, args.augment_bike)
         val_mse = eval_loss(model, val_loader, device)
         sched.step(val_mse)
         dt = time.time() - t0
