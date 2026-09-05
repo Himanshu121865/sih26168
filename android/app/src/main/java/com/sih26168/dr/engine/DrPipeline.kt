@@ -23,7 +23,7 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     private var roadGraph: RoadGraph? = null
     private var matcher: HmmMapMatcher? = null
 
-    var mode: SeamlessHandler.Mode = SeamlessHandler.Mode.GNSS; private set
+    var mode: DrMode = DrMode.GNSS; private set
     var lat = 0.0
     var lon = 0.0
     var lastSnappedLat = 0.0

@@ -43,7 +43,9 @@ class AVNetInference(context: Context) {
                 FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength
             )
         }
-        interpreter = Interpreter(model, Interpreter.Options().apply { numThreads = 2 })
+        val options = Interpreter.Options()
+        options.setNumThreads(2)
+        interpreter = Interpreter(model, options)
     }
 
     /** Push one normalized 6ch sample; call at 100Hz. Returns true when a new inference ran (10Hz). */

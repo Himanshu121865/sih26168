@@ -25,11 +25,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
 }
 
 // Copy the trained model + scaler from the repo root into assets before build.
-// (Keeps a single source of truth: python/export_tflite.py output.)
 tasks.register<Copy>("copyModelAssets") {
     from(rootProject.file("../model.tflite"))
     from(rootProject.file("../scaler.json"))
@@ -47,12 +48,14 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // TFLite — AVNetLite inference
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    // LiteRT — AVNetLite inference.
+    // Downgraded to 1.4.2 to match Kotlin 2.0.20 metadata requirements
+    implementation("com.google.ai.edge.litert:litert:1.4.2")
 
     // MapLibre GL — OSM map rendering + offline regions
-    implementation("org.maplibre.gl:android-sdk:11.8.1")
-    implementation("org.maplibre.gl:android-sdk-geojson:3.0.1")
+    // Downgraded to 11.5.2 to match Kotlin 2.0.20 metadata requirements
+    implementation("org.maplibre.gl:android-sdk:11.5.2")
+    implementation("org.maplibre.gl:android-sdk-geojson:5.9.0")
 
     // Location — FusedLocationProvider (GNSS)
     implementation("com.google.android.gms:play-services-location:21.3.0")

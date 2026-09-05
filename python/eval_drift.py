@@ -5,17 +5,9 @@ eval_drift.py — Step 9 / 11.4 — Evaluate drift% and generate drift_plot.png 
 Masks GPS 60s, integrates velocity predictions vs GT, computes ATE and Drift%.
 Also plots naive double-integration vs AI for proposal.
 
-Modes (F7):
-- --mode 1d (default): legacy along-track cumsum demo. Byte-identical output,
-  keeps synthetic naive (v_gt+N+bias) + map*0.6 for screening PPT.
-- --mode 2d: real 2D trajectory via heading integration + ATE/RTE/coverage
-  from python.eval.metrics (Umeyama SE2). No fake map*0.6 — green curve omitted
-  until road graph available. Accepts optional --gps-track CSV with lat,lon.
-
 Usage:
   python python/eval_drift.py --model experiments/checkpoints/model_avnet_stage1.p --plot reports/drift_plot.png
   python python/eval_drift.py --model none --plot reports/drift_plot_naive.png  # naive baseline only
-  python python/eval_drift.py --mode 2d --model experiments/checkpoints/model_avnet_stage1.p --plot reports/drift_2d.png
 
 Outputs: reports/drift_plot.png with 3 curves (naive red, AVNet blue, AVNet+InEKF green)
 Metrics: final drift (m), max drift, Drift% = ATE / distance
@@ -30,15 +22,6 @@ import matplotlib.pyplot as plt
 
 from python.datasets.iovnbd_dataset import IOVNBDWindowDataset
 from python.models.avnet import AVNetLite
-from python.eval.metrics import ate as _ate, rte as _rte, drift_pct as _drift_pct, total_distance as _total_dist
-
-def latlon_to_enu(lat, lon, lat0, lon0):
-    """Small-area ENU approx (Sivaraman ekf:51-53). lat/lon deg arrays → x=east,y=north meters."""
-    R = 6371000.0
-    lat0r = np.radians(lat0)
-    y = np.radians(np.asarray(lat) - lat0) * R
-    x = np.radians(np.asarray(lon) - lon0) * R * np.cos(lat0r)
-    return np.stack([x, y], axis=-1)
 
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371000
@@ -96,7 +79,7 @@ def generate_drift_plot(val_v_path="data/processed/val_v.npy", model_path=None, 
         with torch.no_grad():
             v_pred = []
             for i in range(0, len(X_seg), 64):
-                xb = torch.from_numpy(np.array(X_seg[i:i+64], dtype=np.float32))  # copy: mmap non-writable
+                xb = torch.from_numpy(X_seg[i:i+64])
                 vp, _, _, _, _ = model(xb)
                 v_pred.append(vp.squeeze(-1).numpy())
             v_pred = np.concatenate(v_pred)
@@ -143,155 +126,12 @@ def generate_drift_plot(val_v_path="data/processed/val_v.npy", model_path=None, 
 
     # also save metrics
     metrics = {
-        "mode": "1d",
         "total_dist_m": float(total_dist),
         "naive_final_m": float(final_naive),
         "ai_final_m": float(final_ai),
         "ai_map_final_m": float(final_map),
         "ai_drift_pct": float(drift_pct_ai),
         "ai_map_drift_pct": float(drift_pct_map),
-        "note": "1d demo: naive=v_gt+N(0,0.5)+0.3 synthetic; map=ai*0.6 placeholder. Use --mode 2d for real ATE/RTE.",
-    }
-    with open(Path(plot_path).with_suffix(".json"), "w") as f:
-        json.dump(metrics, f, indent=2)
-    return metrics
-
-
-def _load_v_pred_1d(val_v_path, model_path, start, seg_len):
-    """Shared helper: load v_gt + v_pred (model or synthetic fallback) for a segment."""
-    val_v = np.load(val_v_path)
-    if len(val_v) < seg_len:
-        seg_len = len(val_v) // 2
-    start = min(start, len(val_v) - seg_len)
-    v_gt = np.asarray(val_v[start:start + seg_len], dtype=np.float64)
-    if model_path and Path(model_path).exists():
-        device = torch.device("cpu")
-        model = AVNetLite()
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.eval()
-        X_val = np.load("data/processed/val_windows.npy", mmap_mode="r")
-        X_seg = X_val[start:start + seg_len]
-        with torch.no_grad():
-            v_pred = []
-            for i in range(0, len(X_seg), 64):
-                xb = torch.from_numpy(np.array(X_seg[i:i + 64], dtype=np.float32))  # copy: mmap non-writable
-                vp, _, _, _, _ = model(xb)
-                v_pred.append(vp.squeeze(-1).numpy())
-            v_pred = np.concatenate(v_pred).astype(np.float64)
-    else:
-        np.random.seed(0)
-        v_pred = v_gt + np.random.normal(0, 0.1, size=v_gt.shape)
-    return v_gt, v_pred, start, seg_len
-
-
-def generate_drift_plot_2d(val_v_path="data/processed/val_v.npy", model_path=None,
-                           plot_path="reports/drift_2d.png", gps_track=None,
-                           val_windows_path="data/processed/val_windows.npy",
-                           scaler_path="python/scaler.json"):
-    """Real 2D eval (F7): heading integration + ATE/RTE/coverage, no fake map curve.
-
-    GT trajectory: --gps-track CSV (lat,lon cols) if given → ENU; else integrate
-    v_gt along heading from gyro yaw in val_windows (denormalized via scaler).
-    Est trajectories: same heading, v_pred / v_naive(synthetic placeholder).
-    """
-    v_gt, v_pred, start, seg_len = _load_v_pred_1d(val_v_path, model_path,
-                                                  start=np.load(val_v_path).shape[0] // 2,
-                                                  seg_len=600)
-    dt = 0.1
-    np.random.seed(0)
-    v_naive = v_gt + np.random.normal(0, 0.5, size=v_gt.shape) + 0.3
-
-    if gps_track and Path(gps_track).exists():
-        import pandas as pd
-        from python.core.signal import find_column
-        df = pd.read_csv(gps_track, encoding="cp1252")
-        df.columns = [c.strip() for c in df.columns]
-        lat_c = find_column(df, r"latitude") or find_column(df, r"lat")
-        lon_c = find_column(df, r"longitude") or find_column(df, r"lon")
-        lat = df[lat_c].values.astype(float)[start:start + seg_len]
-        lon = df[lon_c].values.astype(float)[start:start + seg_len]
-        gt_xy = latlon_to_enu(lat, lon, lat[0], lon[0])
-        # heading from GT for est integration
-        d = np.diff(gt_xy, axis=0)
-        psi = np.concatenate([[np.arctan2(d[0, 0], d[0, 1]) if len(d) else 0.0],
-                              np.arctan2(d[:, 0], d[:, 1])])
-    else:
-        # heading from gyro yaw (ch3) denormalized; fallback straight if missing
-        try:
-            import json as _j
-            X = np.load(val_windows_path, mmap_mode="r")[start:start + seg_len]
-            with open(scaler_path) as _f:
-                _sc = _j.load(_f)
-            _mean = np.array(_sc["mean"], dtype=np.float64)
-            _std = np.array(_sc["std"], dtype=np.float64)
-            gyro_yaw = np.asarray(X[:, -1, 3], dtype=np.float64) * _std[3] + _mean[3]
-            gyro_yaw = np.nan_to_num(gyro_yaw, nan=0.0, posinf=0.0, neginf=0.0)
-            gyro_yaw = np.clip(gyro_yaw, -3.0, 3.0)
-        except Exception:
-            gyro_yaw = np.zeros(seg_len)
-        psi = np.cumsum(gyro_yaw * dt)
-        # GT 2D via v_gt + heading (midpoint Euler)
-        gt_xy = np.zeros((seg_len, 2))
-        for i in range(1, seg_len):
-            mid = psi[i - 1] + 0.5 * gyro_yaw[i - 1] * dt if i - 1 < len(gyro_yaw) else psi[i - 1]
-            gt_xy[i, 0] = gt_xy[i - 1, 0] + float(v_gt[i]) * np.sin(mid) * dt
-            gt_xy[i, 1] = gt_xy[i - 1, 1] + float(v_gt[i]) * np.cos(mid) * dt
-
-    def _integrate(v):
-        xy = np.zeros((seg_len, 2))
-        for i in range(1, seg_len):
-            xy[i, 0] = xy[i - 1, 0] + float(max(v[i], 0.0)) * np.sin(psi[i - 1]) * dt
-            xy[i, 1] = xy[i - 1, 1] + float(max(v[i], 0.0)) * np.cos(psi[i - 1]) * dt
-        return xy
-
-    ai_xy = _integrate(v_pred)
-    naive_xy = _integrate(np.clip(v_naive, 0, None))
-    t_s = np.arange(seg_len) * dt
-
-    ate_ai, _ = _ate(ai_xy, gt_xy, align=False)
-    ate_ai_aligned, _ = _ate(ai_xy, gt_xy, align=True)
-    ate_naive, _ = _ate(naive_xy, gt_xy, align=False)
-    rte_ai = _rte(ai_xy, gt_xy, t_s, window_s=60.0)
-    total_d = _total_dist(gt_xy)
-    final_ai = float(np.linalg.norm(ai_xy[-1] - gt_xy[-1]))
-    final_naive = float(np.linalg.norm(naive_xy[-1] - gt_xy[-1]))
-
-    print(f"[eval-2d] seg {seg_len} total {total_d:.1f}m")
-    print(f"  naive final {final_naive:.1f}m ATE {ate_naive:.2f}m drift {_drift_pct(final_naive, total_d):.1f}%")
-    print(f"  AI final {final_ai:.1f}m ATE {ate_ai:.2f}m (aligned {ate_ai_aligned:.2f}) RTE60 {rte_ai:.2f}m drift {_drift_pct(final_ai, total_d):.1f}%")
-
-    Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
-    fig, ax = plt.subplots(1, 2, figsize=(11, 4))
-    ax[0].plot(gt_xy[:, 0], gt_xy[:, 1], 'k--', label='GT', linewidth=1)
-    ax[0].plot(naive_xy[:, 0], naive_xy[:, 1], 'r-', label=f'Naive ({final_naive:.0f}m)', linewidth=1)
-    ax[0].plot(ai_xy[:, 0], ai_xy[:, 1], 'b-', label=f'AVNet ({final_ai:.1f}m)', linewidth=1.5)
-    ax[0].set_aspect('equal', adjustable='datalim')
-    ax[0].set_xlabel('East (m)'); ax[0].set_ylabel('North (m)')
-    ax[0].set_title('2D trajectory — 60s outage')
-    ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
-    err_ai = np.linalg.norm(ai_xy - gt_xy, axis=1)
-    err_naive = np.linalg.norm(naive_xy - gt_xy, axis=1)
-    ax[1].plot(t_s, err_naive, 'r-', label='Naive err', linewidth=1)
-    ax[1].plot(t_s, err_ai, 'b-', label='AVNet err', linewidth=1.5)
-    ax[1].set_xlabel('Time since outage (s)'); ax[1].set_ylabel('Position error (m)')
-    ax[1].set_title(f'Error vs time — ATE {ate_ai:.1f}m RTE60 {rte_ai:.1f}m')
-    ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(plot_path, dpi=200)
-    print(f"[plot] saved {plot_path}")
-
-    metrics = {
-        "mode": "2d",
-        "total_dist_m": float(total_d),
-        "naive_final_m": final_naive,
-        "ai_final_m": final_ai,
-        "naive_ate_m": float(ate_naive),
-        "ai_ate_m": float(ate_ai),
-        "ai_ate_aligned_m": float(ate_ai_aligned),
-        "ai_rte60_m": float(rte_ai),
-        "ai_drift_pct": float(_drift_pct(final_ai, total_d)),
-        "gps_track": gps_track,
-        "note": "2d: real ATE/RTE, no map curve. naive still synthetic v placeholder until raw-accel 2D baseline.",
     }
     with open(Path(plot_path).with_suffix(".json"), "w") as f:
         json.dump(metrics, f, indent=2)
@@ -303,10 +143,6 @@ def main():
     ap.add_argument("--plot", default="reports/drift_plot.png")
     ap.add_argument("--val-windows", default="data/processed/val_windows.npy")
     ap.add_argument("--val-v", default="data/processed/val_v.npy")
-    ap.add_argument("--mode", choices=["1d", "2d"], default="1d",
-                    help="1d=legacy screening demo (default, byte-identical); 2d=real ATE/RTE, no fake map")
-    ap.add_argument("--gps-track", default=None, help="optional CSV with lat/lon for true 2D GT (else gyro heading)")
-    ap.add_argument("--scaler", default="python/scaler.json")
     args = ap.parse_args()
 
     # also compute MSE if model exists
@@ -320,11 +156,7 @@ def main():
         mse = eval_mse(model, loader, device)
         print(f"[mse] val MSE {mse:.4f} RMSE {mse**0.5:.4f} m/s")
 
-    if args.mode == "2d":
-        generate_drift_plot_2d(args.val_v, args.model, args.plot, args.gps_track,
-                               args.val_windows, args.scaler)
-    else:
-        generate_drift_plot(args.val_v, args.model, args.plot)
+    generate_drift_plot(args.val_v, args.model, args.plot)
 
 if __name__ == "__main__":
     main()

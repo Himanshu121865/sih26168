@@ -1,24 +1,11 @@
 """
-adapter.py — Step 4.2 / QAIIMU adapter port — DEPRECATED (F6 decision).
-
-Status: STUB. Not used by train_avnet.py, inekf_harness.py, or Android.
-Uncertainty comes solely from AVNetLite `head_logsig_vel` (σ_v head).
-
-Why stub (best option): adapter is untrained and expects W=20 @200Hz windows
-we don't have at the 10Hz proxy replay; wiring random cov into R_meas would
-destabilize the validated harness (f8a18d9). Revisit after stage-2 bike data:
-train adapter on 200Hz live stream, then fuse as R_scale alongside σ_v.
-
-Kept for reference + shape test only. Do NOT import in training/inference.
+adapter.py — Step 4.2 / QAIIMU adapter port
+Copied from ref/QAIIMU/graphs/models/adaptive_parameter_adjustment_model.py
+Input: (B, 6, W) or (B, W, 6) normalized IMU window W=20 @200Hz
+Output: (B, 3) measurement covariance diag (lat, lon, up) = base * 10^(beta * tanh)
 """
-import warnings
 import torch
 import torch.nn as nn
-
-warnings.warn(
-    "python.models.adapter is DEPRECATED (F6): σ_v head is the sole uncertainty; "
-    "do not wire into InEKF until stage-2. See module docstring.",
-    DeprecationWarning, stacklevel=2)
 
 class AdaptiveParameterAdjustmentModel(nn.Module):
     def __init__(self, beta=1.0, base_cov=(3,3,3)):

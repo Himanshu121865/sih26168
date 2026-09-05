@@ -14,25 +14,18 @@ Usage:
   python python/preprocess.py --subset 1h          # quick 1h subset for smoke test (<5 min)
   python python/preprocess.py --window 200 --stride 10 --hz 100 --train-ratio 0.8
 """
-import argparse, json, glob
+import argparse, json, glob, re
 from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Single source of truth — core/signal.py (harsh/pipeline.py:30-68).
-# Local copies kept as deprecated wrappers for backward compat.
-from python.core.signal import (
-    find_column as _core_find_column,
-    resample_uniform as _core_resample_uniform,
-    gravity_align_linear as _core_gravity_align,
-    is_window_stationary as _core_is_stationary,
-)
-from python.core.scaler import TrainOnlyScaler
-
-
 # robust column finder (sivaraman/prepare_training_data.py:205)
 def find_column(df, pattern: str):
-    return _core_find_column(df, pattern)
+    regex = re.compile(pattern, re.IGNORECASE)
+    for c in df.columns:
+        if regex.search(c):
+            return c
+    return None
 
 def find_columns_xyz(df, base_pattern):
     # e.g., base "accelerometer" -> X,Y,Z cols
@@ -47,7 +40,6 @@ def find_columns_xyz(df, base_pattern):
     return cols
 
 # shared resample_uniform (harsh/pipeline.py:30-68)
-# DEPRECATED wrapper — use python.core.signal.resample_uniform directly.
 def resample_uniform(t_ns: np.ndarray, values: np.ndarray, rate_hz: float):
     """
     t_ns (N,) int64 ns, values (N,K) or (N,), rate_hz
@@ -55,7 +47,20 @@ def resample_uniform(t_ns: np.ndarray, values: np.ndarray, rate_hz: float):
     Uses period_ns=round(1e9/rate), linear np.interp per channel, left/right=np.nan
     Error if <2 samples.
     """
-    return _core_resample_uniform(t_ns, values, rate_hz)
+    if len(t_ns) < 2:
+        raise ValueError(f"need >=2 samples, got {len(t_ns)}")
+    period_ns = round(1e9 / rate_hz)
+    t_start, t_end = t_ns[0], t_ns[-1]
+    n = int((t_end - t_start) // period_ns) + 1
+    t_new = t_start + np.arange(n) * period_ns
+    if values.ndim == 1:
+        v_new = np.interp(t_new, t_ns, values, left=np.nan, right=np.nan)
+        return t_new, v_new
+    else:
+        v_new = np.empty((n, values.shape[1]))
+        for k in range(values.shape[1]):
+            v_new[:, k] = np.interp(t_new, t_ns, values[:, k], left=np.nan, right=np.nan)
+        return t_new, v_new
 
 def load_phone_csv(path: str) -> pd.DataFrame:
     # cp1252 handles ² byte 0xb2 better than latin1, plus strip
@@ -68,9 +73,8 @@ def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray
     IO-VNBD provides GRAVITY X/Y/Z (already low-pass). Linear acc = ACC - GRAVITY.
     This removes gravity before scaling (harsh pipeline.py:105-108 R_wb@a - [0,0,9.80665]).
     acc_raw (N,3), gravity (N,3) -> linear (N,3)
-    DEPRECATED wrapper — use python.core.signal.gravity_align_linear.
     """
-    return _core_gravity_align(acc_raw, gravity)
+    return acc_raw - gravity
 
 def make_windows(arr: np.ndarray, window=200, stride=10):
     """arr (T,6) -> (N, window, 6)"""
@@ -93,9 +97,19 @@ def is_window_stationary(window_6: np.ndarray, hz=100):
     ZUPT check per window (harsh zupt.py:39-40 thresholds, scaled for vehicle 100Hz).
     window_6 (200,6) linear_acc(3)+gyro(3) @100Hz
     Returns True if stationary (acc var <0.05 and gyro var <0.01 for 0.5s)
-    DEPRECATED wrapper — use python.core.signal.is_window_stationary.
     """
-    return bool(_core_is_stationary(window_6, hz=hz))
+    # use norms
+    acc = window_6[:, :3]
+    gyro = window_6[:, 3:6]
+    a_norm = np.linalg.norm(acc, axis=1)
+    w_norm = np.linalg.norm(gyro, axis=1)
+    # variance over window (200 samples =2s, but detector uses 0.5s sliding — we check whole window var)
+    # For vehicle, use 0.5s sub-window at end
+    tail = 50  # last 0.5s @100Hz
+    a_var = np.var(a_norm[-tail:])
+    w_var = np.var(w_norm[-tail:])
+    # speed gate will be applied via v_label <0.5 later, here just IMU
+    return a_var < 0.05 and w_var < 0.01
 
 def main():
     ap = argparse.ArgumentParser()
@@ -259,17 +273,15 @@ def main():
         # save partial even if val empty, so resume can detect
         if 'X_train' in locals() and len(X_train) > 0:
             print(f"[interrupt] saving partial train {X_train.shape} val {X_val.shape if 'X_val' in locals() and len(X_val)>0 else 'none'}")
-            # still need scaler from what we have (train-only)
-            _sc = TrainOnlyScaler()
-            _sc.fit(X_train, train_files=train_files)
-            _sc.save(args.scaler)
-            # attach run metadata (hz/window/stride/partial) alongside train-only stats
-            with open(args.scaler) as _f:
-                _sj = json.load(_f)
-            _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride, "partial": True})
-            with open(args.scaler, "w") as _f:
-                json.dump(_sj, _f, indent=2)
-            mean = _sc.mean; std = _sc.std
+            # still need scaler from what we have
+            mean = X_train.mean(axis=(0,1)); std = X_train.std(axis=(0,1)) + 1e-6
+            for i in range(len(std)):
+                if std[i] < 1e-8:
+                    mean[i]=0; std[i]=1
+            scaler = {"mean": mean.tolist(), "std": std.tolist(), "hz": args.hz, "window": args.window, "stride": args.stride, "train_files": [str(Path(f).name) for f in train_files], "partial": True}
+            Path(args.scaler).parent.mkdir(parents=True, exist_ok=True)
+            with open(args.scaler, "w") as f:
+                json.dump(scaler, f, indent=2)
             out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
             np.save(out / "train_windows.npy", ((X_train - mean)/std).astype(np.float32))
             np.save(out / "train_v.npy", v_train.astype(np.float32))
@@ -286,17 +298,17 @@ def main():
     print(f"  train mean {X_train.mean(axis=(0,1))} std {X_train.std(axis=(0,1))}")
     print(f"  val mean {X_val.mean(axis=(0,1))} std {X_val.std(axis=(0,1))}")
 
-    # scaler from train only (train-only, sivaraman/agastya) via shared TrainOnlyScaler
-    _scaler = TrainOnlyScaler()
-    _scaler.fit(X_train, train_files=train_files)
-    _scaler.save(args.scaler)
-    # attach run metadata alongside train-only stats
-    with open(args.scaler) as _f:
-        _sj = json.load(_f)
-    _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride})
-    with open(args.scaler, "w") as _f:
-        json.dump(_sj, _f, indent=2)
-    mean = _scaler.mean; std = _scaler.std
+    # scaler from train only (train-only, sivaraman/agastya)
+    mean = X_train.mean(axis=(0,1))
+    std = X_train.std(axis=(0,1)) + 1e-6
+    # PASS_THROUGH for any future binary flags would be mean=0,std=1 if std<1e-8 — not needed for 6ch, but keep logic
+    for i in range(len(std)):
+        if std[i] < 1e-8:
+            mean[i] = 0; std[i] = 1
+    scaler = {"mean": mean.tolist(), "std": std.tolist(), "hz": args.hz, "window": args.window, "stride": args.stride, "train_files": [str(Path(f).name) for f in train_files]}
+    Path(args.scaler).parent.mkdir(parents=True, exist_ok=True)
+    with open(args.scaler, "w") as f:
+        json.dump(scaler, f, indent=2)
     print(f"[scaler] {args.scaler} mean {mean} std {std}")
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)

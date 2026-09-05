@@ -7,18 +7,21 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
+import android.view.View
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.sih26168.dr.engine.DrMode
 import com.sih26168.dr.engine.DrPipeline
 import com.sih26168.dr.io.CsvLogger
 import com.sih26168.dr.map.OfflineRegionManager
@@ -27,20 +30,25 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.maplibre.android.MapLibre
+import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
 import org.maplibre.android.geometry.LatLng
-import org.maplibre.android.geometry.LatLngBounds
 import org.maplibre.android.maps.MapView
 import org.maplibre.android.maps.Style
 import org.maplibre.android.style.layers.LineLayer
+import org.maplibre.android.style.layers.PropertyFactory
 import org.maplibre.android.style.sources.GeoJsonSource
 import org.maplibre.geojson.Feature
 import org.maplibre.geojson.FeatureCollection
 import org.maplibre.geojson.LineString
 import org.maplibre.geojson.Point
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.exp
+import kotlin.math.sin
 import kotlin.math.sqrt
 
-class MainActivity : AppCompatActivity(), SensorEventListener {
+class MainActivity : AppCompatActivity() {
 
     companion object {
         // Detailed OSM vector style, no key, works offline after download.
@@ -57,7 +65,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var offline: OfflineRegionManager
 
     private var source: GeoJsonSource? = null
-    private val track = ArrayList<Point>()
+    private val track = mutableListOf<Point>()
     private var lastSensorTs = 0L
     private var tStart = 0L
     private var distTraveled = 0.0
@@ -66,15 +74,17 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var lastGnssLon: Double? = null
     private var mapReady = false
     private var pendingCenter: LatLng? = null
-    private var loadingOverlay: android.view.View? = null
+    private var loadingOverlay: View? = null
     private var firstFixDone = false
 
-    private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
+    private lateinit var locationClient: FusedLocationProviderClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        MapLibre.getInstance(this)
+        locationClient = LocationServices.getFusedLocationProviderClient(this)
+        MapLibre.getInstance(applicationContext)
         setContentView(R.layout.activity_main)
+        tStart = System.currentTimeMillis()
 
         statusChip = findViewById(R.id.statusChip)
         sheetSummary = findViewById(R.id.sheetSummary)
@@ -95,8 +105,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     style.addLayer(
                         LineLayer("track-layer", "dr-track")
                             .withProperties(
-                                org.maplibre.android.style.layers.PropertyFactory.lineColor("#1A73E8"),
-                                org.maplibre.android.style.layers.PropertyFactory.lineWidth(5f),
+                                PropertyFactory.lineColor("#1A73E8"),
+                                PropertyFactory.lineWidth(5f),
                             )
                     )
                     pendingCenter?.let {
@@ -104,15 +114,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                         pendingCenter = null
                     }
                     // initial text now that map is ready
-                    sheetDetail.visibility = android.view.View.VISIBLE
-                    sheetDetail.text = getString(R.string.detail_line, 0f, 0f, 0f)
+                    sheetDetail.visibility = View.VISIBLE
+                    sheetDetail.text = getString(R.string.detail_line, 0f, 0f, 0f, 0f, 0f, "false", 0)
                 }
             })
-            map.uiSettings.isCompassEnabled = true
-            map.uiSettings.isLogoEnabled = false
-            map.uiSettings.isAttributionEnabled = true
+            map.uiSettings.setCompassEnabled(true)
+            map.uiSettings.setLogoEnabled(false)
+            map.uiSettings.setAttributionEnabled(true)
             // default to Delhi until GNSS fixes — will be overridden by first fix below
-            map.cameraPosition = org.maplibre.android.camera.CameraPosition.Builder()
+            map.cameraPosition = CameraPosition.Builder()
                 .target(LatLng(28.6139, 77.2090)).zoom(11.0).build()
             tryHideLoading()
         }
@@ -144,7 +154,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             forceHideLoading()
         }
         // Tap loading to dismiss immediately
-        findViewById<android.view.View>(R.id.loadingOverlay)?.setOnClickListener {
+        findViewById<View>(R.id.loadingOverlay)?.setOnClickListener {
             forceHideLoading()
         }
 
@@ -155,9 +165,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 val dt = 0.1
                 lastV = pipeline.onFusionTick(dt, null, null)
                 val v = lastV
-                val mode = pipeline.mode
+                val mode: DrMode = pipeline.mode
                 // Dead-reckon position only when GNSS is actually gone (INS mode).
-                if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.INS) {
+                if (mode == DrMode.INS) {
                     val course = pipeline.alignment.yawGnss
                     if (course != null && v > 0.22) {
                         val d = v * dt
@@ -168,9 +178,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                 }
                 // While GNSS is live, show the GPS position — never the drifted DR estimate.
-                val uiLat = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLat != null)
+                val uiLat = if (mode == DrMode.GNSS && lastGnssLat != null)
                     lastGnssLat!! else pipeline.lat
-                val uiLon = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLon != null)
+                val uiLon = if (mode == DrMode.GNSS && lastGnssLon != null)
                     lastGnssLon!! else pipeline.lon
                 updateUi(uiLat, uiLon)
             }
@@ -205,7 +215,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 startLocation()
                 // center once we have a fix
                 lastGnssLat?.let { lat -> lastGnssLon?.let { lon ->
-                    mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(lat, lon), 16.0)) }
+                    mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(
+                        LatLng(lat, lon), 16.0)) }
                 }}
             } else {
                 Toast.makeText(this, "Location denied — map will be offline only", Toast.LENGTH_LONG).show()
@@ -216,42 +227,43 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun startSensors() {
         val sm = getSystemService(SENSOR_SERVICE) as SensorManager
-        val rateUs = (1_000_000_000 / 100)  // 100Hz
-        sm.registerListener(this, sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), rateUs)
-        sm.registerListener(this, sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE), rateUs)
+        val rateUs = 1_000_000 / 100  // registerListener expects microseconds; 10,000us = 100Hz.
+        sm.registerListener(sensorListener, sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), rateUs)
+        sm.registerListener(sensorListener, sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE), rateUs)
     }
 
     private val lastAcc = DoubleArray(3)
     private val lastGyro = DoubleArray(3)
 
-    override fun onSensorChanged(e: SensorEvent) {
-        when (e.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> {
-                lastAcc[0] = e.values[0].toDouble(); lastAcc[1] = e.values[1].toDouble(); lastAcc[2] = e.values[2].toDouble()
+    private val sensorListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            when (e.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> {
+                    lastAcc[0] = e.values[0].toDouble(); lastAcc[1] = e.values[1].toDouble(); lastAcc[2] = e.values[2].toDouble()
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    lastGyro[0] = e.values[0].toDouble(); lastGyro[1] = e.values[1].toDouble(); lastGyro[2] = e.values[2].toDouble()
+                }
+                else -> return
             }
-            Sensor.TYPE_GYROSCOPE -> {
-                lastGyro[0] = e.values[0].toDouble(); lastGyro[1] = e.values[1].toDouble(); lastGyro[2] = e.values[2].toDouble()
-            }
-            else -> return
+            val dt = if (lastSensorTs == 0L) 0.01 else (e.timestamp - lastSensorTs) / 1e9
+            lastSensorTs = e.timestamp
+            pipeline.onImu(lastAcc, lastGyro, dt)
         }
-        val dt = if (lastSensorTs == 0L) 0.01 else (e.timestamp - lastSensorTs) / 1e9
-        lastSensorTs = e.timestamp
-        pipeline.onImu(lastAcc, lastGyro, dt)
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
     }
-
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun tryHideLoading() {
         if (firstFixDone && mapReady) {
             loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
-                loadingOverlay?.visibility = android.view.View.GONE
+                loadingOverlay?.visibility = View.GONE
             }?.start()
         }
     }
 
     private fun forceHideLoading() {
         loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
-            loadingOverlay?.visibility = android.view.View.GONE
+            loadingOverlay?.visibility = View.GONE
         }?.start()
         firstFixDone = true
     }
@@ -265,7 +277,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
                         pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
                     }
-                    val target = LatLng(loc.latitude, loc.longitude)
+                    val target = org.maplibre.android.geometry.LatLng(loc.latitude, loc.longitude)
                     if (mapReady) {
                         mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(target, 15.0)) }
                     } else {
@@ -292,7 +304,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                         firstFixDone = true
                         tryHideLoading()
                         if (mapReady) {
-                            mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(loc.latitude, loc.longitude), 16.0)) }
+                            mapView.getMapAsync { m -> m.animateCamera(CameraUpdateFactory.newLatLngZoom(
+                                LatLng(loc.latitude, loc.longitude), 16.0)) }
                         } else {
                             pendingCenter = LatLng(loc.latitude, loc.longitude)
                         }
@@ -313,18 +326,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val mode = pipeline.mode
         if (isValidFix) distTraveled += v * 0.1
         runOnUiThread {
-            statusChip.text = getString(
-                when (mode) {
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS -> R.string.mode_gnss
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.INS -> R.string.mode_ins
-                }
-            )
-            statusChip.setTextColor(
-                when (mode) {
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS -> 0xFF1A73E8.toInt()
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.INS -> 0xFFE8710A.toInt()
-                }
-            )
+            statusChip.text = getString(if (mode == DrMode.GNSS) R.string.mode_gnss else R.string.mode_ins)
+            statusChip.setTextColor(if (mode == DrMode.GNSS) 0xFF1A73E8.toInt() else 0xFFE8710A.toInt())
             val pos = pipeline.ekf.position()
             val rawSigma = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2])
             val sigma = if (rawSigma.isFinite()) rawSigma else 0.0  // EKF can be NaN before first GPS
@@ -336,14 +339,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 distTraveled.toFloat(),
                 pipeline.lastRawModelV.toFloat(),
                 pipeline.avnet.sigmaV.toFloat(),
-                pipeline.lastStill,
+                pipeline.lastStill.toString(),
                 pipeline.motionConfirmMsPublic,
             )
             if (isValidFix) {
                 // Drop initial 0,0 if it slipped in, and avoid duplicate last point
                 if (track.isNotEmpty() && track[0].longitude() == 0.0 && track[0].latitude() == 0.0) track.removeAt(0)
                 if (track.isEmpty() || track.last().longitude() != gnssLon || track.last().latitude() != gnssLat) {
-                    track.add(Point.fromLngLat(gnssLon, gnssLat))
+                    track.add(org.maplibre.geojson.Point.fromLngLat(gnssLon, gnssLat))
                     // keep last 500 points to avoid memory bloat
                     if (track.size > 500) track.removeAt(0)
                 }

@@ -163,7 +163,10 @@ class InEKFEngine(useGravity: Boolean = true) {
             dx[i] = s
         }
 
-        val (dR, dv, dp) = LieGroup.sen3exp(dx.copyOfRange(0, 9))
+        val result = LieGroup.sen3exp(dx.copyOfRange(0, 9))
+        val dR = result.first
+        val dv = result.second
+        val dp = result.third
         R = LieGroup.matMul(dR, R)
         val vRot = LieGroup.matVec(dR, v)
         v = doubleArrayOf(vRot[0] + dv[0], vRot[1] + dv[1], vRot[2] + dv[2])
