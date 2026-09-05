@@ -20,6 +20,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.sih26168.dr.engine.DrPipeline
+import com.sih26168.dr.engine.SeamlessHandler.FusionMode
 import com.sih26168.dr.io.CsvLogger
 import com.sih26168.dr.map.OfflineRegionManager
 import com.sih26168.dr.map.RoadGraph
@@ -90,8 +91,12 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             map.setStyle(Style.Builder().fromUri(STYLE_URL), object : Style.OnStyleLoaded {
                 override fun onStyleLoaded(style: Style) {
                     mapReady = true
-                    source = GeoJsonSource("dr-track")
-                    style.addSource(source!!)
+                    // Field stays nullable for later setGeoJson calls; the `also`
+                    // block proves non-null to the compiler without `!!`.
+                    GeoJsonSource("dr-track").also {
+                        source = it
+                        style.addSource(it)
+                    }
                     style.addLayer(
                         LineLayer("track-layer", "dr-track")
                             .withProperties(
@@ -118,8 +123,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         findViewById<FloatingActionButton>(R.id.btnLocate).setOnClickListener {
+            // Capture to locals so smart-cast applies (fields are mutable vars).
+            val fixLat = lastGnssLat
+            val fixLon = lastGnssLon
             val target = when {
-                lastGnssLat != null && lastGnssLon != null -> LatLng(lastGnssLat!!, lastGnssLon!!)
+                fixLat != null && fixLon != null -> LatLng(fixLat, fixLon)
                 pipeline.lat != 0.0 || pipeline.lon != 0.0 -> LatLng(pipeline.lat, pipeline.lon)
                 else -> null
             }
@@ -156,8 +164,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 lastV = pipeline.onFusionTick(dt, null, null)
                 val v = lastV
                 val mode = pipeline.mode
-                // Dead-reckon position only when GNSS is actually gone (INS mode).
-                if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.INS) {
+                // Dead-reckon position only when GNSS is actually gone.
+                if (mode is FusionMode.DeadReckoning) {
                     val course = pipeline.alignment.yawGnss
                     if (course != null && v > 0.22) {
                         val d = v * dt
@@ -168,10 +176,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                 }
                 // While GNSS is live, show the GPS position — never the drifted DR estimate.
-                val uiLat = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLat != null)
-                    lastGnssLat!! else pipeline.lat
-                val uiLon = if (mode == com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS && lastGnssLon != null)
-                    lastGnssLon!! else pipeline.lon
+                // Locals enable smart-cast; fields stay nullable for the location callback.
+                val fixLat = lastGnssLat
+                val fixLon = lastGnssLon
+                val uiLat = if (mode is FusionMode.GnssAided && fixLat != null) fixLat else pipeline.lat
+                val uiLon = if (mode is FusionMode.GnssAided && fixLon != null) fixLon else pipeline.lon
                 updateUi(uiLat, uiLon)
             }
         }
@@ -315,14 +324,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         runOnUiThread {
             statusChip.text = getString(
                 when (mode) {
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS -> R.string.mode_gnss
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.INS -> R.string.mode_ins
+                    is FusionMode.GnssAided -> R.string.mode_gnss
+                    is FusionMode.DeadReckoning -> R.string.mode_ins
                 }
             )
             statusChip.setTextColor(
                 when (mode) {
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.GNSS -> 0xFF1A73E8.toInt()
-                    com.sih26168.dr.engine.SeamlessHandler.Mode.INS -> 0xFFE8710A.toInt()
+                    is FusionMode.GnssAided -> 0xFF1A73E8.toInt()
+                    is FusionMode.DeadReckoning -> 0xFFE8710A.toInt()
                 }
             )
             val pos = pipeline.ekf.position()
@@ -354,7 +363,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             (System.currentTimeMillis() - tStart) / 1000.0,
             pipeline.lat, pipeline.lon, gnssLat, gnssLon,
             v, pipeline.avnet.sigmaV.toDouble(), pipeline.lean.phi, pipeline.lean.pBike,
-            mode.name,
+            mode.displayName,
         )
     }
 

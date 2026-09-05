@@ -7,7 +7,12 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** CSV logger: timestamp, p_pred, p_gnss, v_ai, phi, p_bike, mode — AGENTS.md 12.4. */
+/**
+ * CSV logger: timestamp, p_pred, p_gnss, v_ai, phi, p_bike, mode — AGENTS.md 12.4.
+ *
+ * Files land in the app's Documents dir as `dr_log_<ts>.csv`. Logging is
+ * off until [start] is called; every method is a no-op otherwise.
+ */
 class CsvLogger(context: Context) {
     private val dir: File = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
         ?: context.filesDir
