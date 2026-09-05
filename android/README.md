@@ -9,7 +9,7 @@ Phone-only dead reckoning with GNSS fusion, offline OSM maps, and AI speed predi
    from the repo root into `app/src/main/assets/` automatically.
 3. Run on a device (needs real sensors — emulator IMUs are too clean).
 
-CLI: `./gradlew assembleDebug`
+CLI: `gradle :app:assembleDebug --project-dir android` (no `gradlew` wrapper checked in; CI uses Gradle 8.7)
 
 ## What's inside
 

@@ -1,0 +1,13 @@
+# Owners review their track; interface paths need both tracks.
+# TODO(team): replace @Himanshu121865 with per-track leads once handles are known.
+# Android crew
+/android/ @Himanshu121865
+# AI-model crew
+/python/ @Himanshu121865
+/sih26168_colab.ipynb @Himanshu121865
+/tests/ @Himanshu121865
+# Shared interfaces — cross-track review required
+/model.tflite @Himanshu121865
+/scaler.json @Himanshu121865
+/docs/ @Himanshu121865
+/screening_bundle.zip @Himanshu121865
