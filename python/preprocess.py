@@ -97,6 +97,56 @@ def is_window_stationary(window_6: np.ndarray, hz=100):
     """
     return bool(_core_is_stationary(window_6, hz=hz))
 
+def _driver_of(path: str) -> str:
+    """Driver letter from the category dir, e.g. 'Vtb (Driver E)' -> 'E'."""
+    import re as _re
+
+    grandparent = Path(path).parent.parent.name
+    m = _re.search(r"Driver ([A-Z])", grandparent)
+    return m.group(1) if m else "?"
+
+
+def stratified_split(
+    s_files: list, train_ratio: float = 0.8, seed: int = 26168
+) -> tuple[list, list]:
+    """Split files 80/20 within (driver × speed-tercile) buckets.
+
+    Same seed family as the random split, so results are reproducible. Buckets
+    with a single file go to train (cannot split one file). Prints the bucket
+    table for the audit trail.
+    """
+    means: dict[str, float] = {}
+    for f in s_files:
+        try:
+            df = load_phone_csv(f)
+            v_c = find_column(df, r"gps speed") or "GPS SPEED (Kmh)"
+            vals = df[v_c].values.astype(float) if v_c in df.columns else np.zeros(len(df))
+            means[f] = float(np.nanmean(vals))
+        except Exception:
+            means[f] = 0.0
+    ordered = sorted(means.values())
+    lo, hi = ordered[len(ordered) // 3], ordered[2 * len(ordered) // 3]
+    buckets: dict[tuple[str, str], list] = {}
+    for f in s_files:
+        band = "lo" if means[f] < lo else ("hi" if means[f] > hi else "mid")
+        buckets.setdefault((_driver_of(f), band), []).append(f)
+    train_files, val_files = [], []
+    for bi, key in enumerate(sorted(buckets)):
+        members = sorted(buckets[key])
+        if len(members) == 1:
+            train_files.extend(members)
+            print(f"[strat] bucket {key}: n=1 -> train (singleton)")
+            continue
+        brng = np.random.default_rng(seed * 1000 + bi)
+        perm = brng.permutation(len(members))
+        n_tr = max(1, int(len(members) * train_ratio))
+        tr_idx = set(perm[:n_tr].tolist())
+        for i, m in enumerate(members):
+            (train_files if i in tr_idx else val_files).append(m)
+        print(f"[strat] bucket {key}: n={len(members)} -> train {n_tr} val {len(members) - n_tr}")
+    return train_files, val_files
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset", choices=["1h","full"], default="full")
@@ -104,6 +154,8 @@ def main():
     ap.add_argument("--stride", type=int, default=10)
     ap.add_argument("--hz", type=int, default=100)
     ap.add_argument("--train-ratio", type=float, default=0.8)
+    ap.add_argument("--split", choices=["random","stratified"], default="random",
+                    help="random=seeded shuffle (default, backward compat); stratified=80/20 within driver×speed buckets (ADR-010 branch A)")
     ap.add_argument("--out", default="data/processed")
     ap.add_argument("--scaler", default="python/scaler.json")
     ap.add_argument("--resume", action="store_true", help="resume from existing npy if interrupted (skip completed files)")
@@ -122,13 +174,16 @@ def main():
         return
 
     # split by trajectory (file), not window — prevents leakage (harsh/loaders.py:287)
-    n_train_files = int(len(s_files) * args.train_ratio)
-    rng = np.random.default_rng(26168)
-    perm_files = rng.permutation(len(s_files))
-    train_files_idx = set(perm_files[:n_train_files])
-    train_files = [s_files[i] for i in range(len(s_files)) if i in train_files_idx]
-    val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
-    print(f"[split] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
+    if args.split == "stratified":
+        train_files, val_files = stratified_split(s_files, args.train_ratio)
+    else:
+        n_train_files = int(len(s_files) * args.train_ratio)
+        rng = np.random.default_rng(26168)
+        perm_files = rng.permutation(len(s_files))
+        train_files_idx = set(perm_files[:n_train_files])
+        train_files = [s_files[i] for i in range(len(s_files)) if i in train_files_idx]
+        val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
+    print(f"[split:{args.split}] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
 
     # handle Ctrl-C gracefully: save what we have so far
     import signal

@@ -30,11 +30,14 @@ from python.core.signal import (
     resample_uniform,
 )
 from python.models.avnet import AVNetLite
-from python.preprocess import make_windows
+from python.preprocess import make_windows, stratified_split
 
 
-def rebuild_split(base, train_ratio=0.8, seed=26168):
+def rebuild_split(base: str, train_ratio: float = 0.8, seed: int = 26168, split: str = "random") -> tuple[list, list]:
+    """Reproduce the preprocess split (random default; stratified for ADR-010 branch A)."""
     s_files = sorted(glob.glob(str(Path(base) / "**/S-*.csv"), recursive=True))
+    if split == "stratified":
+        return stratified_split(s_files, train_ratio, seed)
     rng = np.random.default_rng(seed)
     perm = rng.permutation(len(s_files))
     train_idx = set(perm[: int(len(s_files) * train_ratio)])
@@ -126,9 +129,11 @@ def main():
     ap.add_argument("--out", default="reports/per_file_val.csv")
     ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--split", choices=["random", "stratified"], default="random",
+                    help="must match the preprocess --split used for this checkpoint")
     args = ap.parse_args()
 
-    _, val_files = rebuild_split(args.base)
+    _, val_files = rebuild_split(args.base, split=args.split)
     print(f"[audit] val files ({len(val_files)}):")
     for f in val_files:
         print(f"  {Path(f).parent.name}/{Path(f).name}")
