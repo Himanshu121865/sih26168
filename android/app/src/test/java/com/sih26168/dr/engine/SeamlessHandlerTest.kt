@@ -17,22 +17,31 @@ class SeamlessHandlerTest {
     }
 
     @Test
-    fun lossAfter300ms_switchesToDeadReckoning() {
+    fun lossAfter1500ms_switchesToDeadReckoning() {
         val h = SeamlessHandler()
-        repeat(3) { h.tick(100) } // 300ms elapsed — boundary is strict `>`
+        repeat(15) { h.tick(100) } // 1500ms elapsed — boundary is strict `>`
         assertTrue(h.mode is FusionMode.GnssAided)
-        h.tick(100) // 400ms > 300ms
+        h.tick(100) // 1600ms > 1500ms: two missed 1 Hz fixes = outage
         assertTrue(h.mode is FusionMode.DeadReckoning)
         assertEquals(1e9, h.gnssRScale(), 0.0)
     }
 
     @Test
+    fun singleMissedFix_staysGnss() {
+        // One missed 1 Hz fix (1000ms gap) must NOT trip the handler (ADR-008).
+        val h = SeamlessHandler()
+        h.onFix(0)
+        repeat(10) { h.tick(100) } // 1000ms without fix
+        assertTrue(h.mode is FusionMode.GnssAided)
+    }
+
+    @Test
     fun reacquire_blendsTrustOver1s() {
         val h = SeamlessHandler()
-        repeat(4) { h.tick(100) } // t=400 -> INS
-        // Fixes must keep arriving inside the 300ms loss window (production: ~1Hz
-        // location updates), otherwise the ramp correctly aborts back to INS.
-        var clock = 400L
+        repeat(16) { h.tick(100) } // t=1600 > 1500 -> INS
+        // Fixes must keep arriving inside the 1500ms loss window, otherwise
+        // the ramp correctly aborts back to INS.
+        var clock = 1600L
         h.onFix(clock)
         val trusts = (1..4).map {
             clock += 250

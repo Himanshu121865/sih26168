@@ -1,7 +1,7 @@
 # ADR-008: Loss-detection window vs 1 Hz GNSS cadence (FLAPPING RISK)
 
 ## Status
-Proposed — needs stakeholder decision before the field test.
+Accepted 2026-09-05 — `lossAfterMs` raised to 1500 ms.
 
 ## Context
 `lossAfterMs = 300` satisfies the PS "milliseconds handover" requirement, but
@@ -12,11 +12,11 @@ flapping, not a real outage. The sealed-state migration (ADR-007) preserved thes
 semantics exactly; this ADR questions them.
 
 ## Decision
-Pending. Recommendation: raise `lossAfterMs` to ~1500 ms (1 missed fix tolerated,
-2 missed = outage) OR gate the transition on fix quality (HDOP/sats) in addition
-to age. Keep the 300 ms figure only for the integer in the proposal narrative if
-judges test handover latency with a hard cut (Faraday), where any value ≤1000 ms
-passes identically.
+Raised `lossAfterMs` to 1500 ms: one missed 1 Hz fix is tolerated, two missed
+fixes is an outage. Worst-case handover latency grows 300 ms → 1500 ms — still
+"seamless" against a 60 s outage demo, and a Faraday hard cut trips any
+threshold, so the demo story is unchanged. Quality-gating (HDOP/sats) stays a
+future option, not needed for the finale.
 
 ## Consequences
 

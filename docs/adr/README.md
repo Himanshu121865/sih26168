@@ -9,7 +9,7 @@
 | [0005](0005-tflite-export-gate.md) | TFLite FP16 export with ONNX validation gate | Accepted |
 | [0006](0006-train-from-scratch.md) | Train from scratch; reject RoNIN/TLIO weights | Accepted |
 | [0007](0007-sealed-fusion-mode.md) | Sealed FusionMode state | Accepted |
-| [0008](0008-loss-window-flapping.md) | Loss-window vs 1 Hz cadence (flapping risk) | Proposed |
+| [0008](0008-loss-window-flapping.md) | Loss-window vs 1 Hz cadence (flapping risk) | Accepted |
 | [0009](0009-apply-map-snap.md) | Apply HMM snap to emitted pose | Proposed |
 | [0010](0010-training-strategy.md) | Full-72-seq strategy after val 1.73 plateau | Proposed |
 

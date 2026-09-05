@@ -295,11 +295,11 @@ Paper §Implementation details cites:
 **Objective:** Prove it works live on phone — 6 capabilities demo.
 
 - **12.1** Scaffold `android/` via `Android Studio Hedgehog`: `SensorManager` 100Hz + `FusedLocationProvider` 1Hz + `TFLite 2.14` + `MapLibre GL` offline.
-- **12.2** Port modules: `AVNetInference.kt` (TFLite), `LeanDetector.kt` (Step 5.1), `InEKFEngine.kt` (from `inekf_harness.py`, float64), `HMMMapMatcher.kt` (from `hmm_matcher.py`), `SeamlessHandler.kt` (300ms loss detect → `R_gnss→∞` over 200ms, soft reset `α 0→1` over 1s).
+- **12.2** Port modules: `AVNetInference.kt` (TFLite), `LeanDetector.kt` (Step 5.1), `InEKFEngine.kt` (from `inekf_harness.py`, float64), `HMMMapMatcher.kt` (from `hmm_matcher.py`), `SeamlessHandler.kt` (1500ms loss detect per ADR-008 → `R_gnss→∞`, soft reset `α 0→1` over 1s).
 - **12.3** Alignment: `AlignmentEngine.kt` — Madgwick + PCA (roll/pitch from gravity low-pass, yaw from mag + GNSS cog), `R_pv` update /5s, re-calib on ΔR>15°.
 - **12.4** UI: `MapLibre` view 30fps, vehicle arrow, badge `GNSS/INS/Fused`, confidence halo `σ`, CSV logger `timestamp, p_pred, p_gnss, v_ai, φ, p_bike`.
 - **12.5** Field test: drive 1km with known start/end fix, mask GNSS 60s (or Faraday pouch), log `final drift, max drift, handover latency, map adherence%`.
-  - *Metrics:* `final drift <5%`, `handover <200ms`, `adherence >95%`, `update 10Hz`.
+  - *Metrics:* `final drift <5%`, `handover <1.5s` (ADR-008), `adherence >95%`, `update 10Hz`.
 - **12.6** Video: side-by-side `Google Maps freeze` vs `your smooth trace` in underpass — mandatory for PPT.
 - **12.7** Build: `./gradlew assembleRelease` → `app-release.apk` + `edge_engine.so` (FOG stub).
 

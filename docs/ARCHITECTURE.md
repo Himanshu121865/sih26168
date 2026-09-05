@@ -48,7 +48,7 @@ graph TB
         AVNET[AI Speed & Vibration Filter<br/>AVNet-lite TFLite<br/>CNN+GRU → v_fwd + σ]
         FUSION[Invariant EKF Fusion<br/>p,v,q,b_a,b_g<br/>10Hz]
         HMM[HMM Map Matcher<br/>Viterbi on OSM edges<br/>NHC pseudo]
-        HANDLER[Seamless Handler<br/>GNSS loss <200ms<br/>soft reset]
+        HANDLER[Seamless Handler<br/>GNSS loss 1500ms<br/>soft reset]
         MAP[Map Engine<br/>OSM R-tree + MapLibre GL<br/>offline tiles]
         UI[UI Layer<br/>MapLibre view 30fps<br/>badge GNSS/INS/Fused]
         STORE[Local Store<br/>CSV logger + Ring Buffer<br/>200 window]
@@ -157,22 +157,23 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> GNSS_AIDED: HDOP<2, fix 3D
-    GNSS_AIDED --> DR: loss >300ms OR HDOP>5×3
+    GNSS_AIDED --> DR: loss >1500ms (2 missed 1Hz fixes) OR HDOP>5×3
     DR --> GNSS_AIDED: fix regained + soft reset
     GNSS_AIDED: EKF updates GNSS+AVNet+NHC
-    DR: Updates AVNet+NHC only,<br/>R_gnss→∞ over 200ms
+    DR: Updates AVNet+NHC only,<br/>R_gnss→∞ on entry
 
     note right of DR
         Freeze b_a/b_g last GNSS
         Snap to HMM edge
-        <200ms latency
+        1500ms detection (ADR-008)
     end note
     note right of GNSS_AIDED
         Soft reset<br/>p=α·p_gnss+(1-α)·p_pred<br/>α 0→1 over 1s<br/>no jump
     end note
 ```
 
-*   Detection `300ms` no fix → requirement: milliseconds handover.
+*   Detection `1500ms` without fix (one missed 1 Hz fix tolerated) → ADR-008.
+    Handover stays "seamless" against a 60 s outage demo.
 
 ### 3.6 Offline Training Pipeline
 

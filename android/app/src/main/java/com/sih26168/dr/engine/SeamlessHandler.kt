@@ -3,14 +3,16 @@ package com.sih26168.dr.engine
 /**
  * Seamless GNSS deficit handler — AGENTS.md Step 12.2.
  *
- * Loss: 300ms without fix -> [FusionMode.DeadReckoning], GNSS covariance ramps
- * to infinity. Reacquire: soft reset, blending trust ramps 0->1 over 1s.
+ * Loss: 1500ms without fix -> [FusionMode.DeadReckoning], GNSS covariance ramps
+ * to infinity. One missed 1 Hz fix is tolerated; two missed is an outage
+ * (ADR-008: 300ms flapped between healthy fixes). Reacquire: soft reset,
+ * blending trust ramps 0->1 over 1s.
  *
  * The fusion state is a sealed interface so consumers handle every case
  * exhaustively with `when` (no `else` needed — the compiler enforces it).
  */
 class SeamlessHandler(
-    private val lossAfterMs: Long = 300,
+    private val lossAfterMs: Long = 1500,
     private val rRampMs: Long = 200,
     private val reacquireBlendMs: Long = 1000,
 ) {

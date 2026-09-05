@@ -24,7 +24,7 @@ app/src/main/java/com/sih26168/dr/
 │   ├── LeanDetector.kt      # bike lean + adaptive NHC (v_lat = v_fwd·sinφ)
 │   ├── ZuptDetector.kt      # stationary detect -> v=0 update
 │   ├── AlignmentEngine.kt   # roll/pitch from gravity, yaw from GNSS course
-│   ├── SeamlessHandler.kt   # GNSS loss 300ms -> INS; soft re-blend 1s
+│   ├── SeamlessHandler.kt   # GNSS loss 1500ms -> INS; soft re-blend 1s
 │   └── DrPipeline.kt        # glue: IMU -> AVNet -> InEKF -> pose
 ├── map/
 │   ├── OfflineRegionManager.kt  # "Download this area" — OSM tiles via MapLibre offline
@@ -48,11 +48,13 @@ Two paths (both per the PS):
 - `LieGroupTest` — so3exp identity/orthogonality, sen3exp vs python
 - `LeanDetectorTest` — φ=30° → v_lat = v_fwd·sinφ (mirrors `--test-lean` PASS)
 - `InEKFEngineTest` — propagate stability, update convergence, bias clamp
+- `SeamlessHandlerTest` — 1500ms loss boundary, single-missed-fix tolerance, 1s blend
+- `ZuptDetectorTest` — still latches, moving/speed-gate rejects, partial window
 
 ## Field-test procedure (finale)
 
 1. Mount phone rigid (holder), start app, drive with GNSS for 30s (alignment + model warmup).
-2. Simulate outage: airplane mode (or Faraday pouch). App flips GNSS→INS in <300ms.
+2. Simulate outage: airplane mode (or Faraday pouch). App flips GNSS→INS in <1.5s.
 3. Drive 1km @60km/h. Check drift on the CSV log (`Android/data/com.sih26168.dr/files/Documents/`).
 4. Re-enable GNSS — soft blend back over 1s. Target: drift <5%, handover seamless.
 
