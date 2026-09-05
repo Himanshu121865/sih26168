@@ -266,6 +266,8 @@ Memory: Model 1.2MB + OSM tiles 40MB + ring buffer 2MB.
 | Stack | Native [Kotlin](https://kotlinlang.org/) + [SensorManager](https://developer.android.com/reference/android/hardware/SensorManager) | Flutter/React Native | Native gives stable 100Hz, jitter in cross-platform |
 | Export | [TFLite FP16](https://www.tensorflow.org/lite) | ONNX Runtime Mobile | TFLite smaller, NNAPI accelerated |
 
+> Full decision history with trade-offs: [docs/adr/](adr/README.md) (ADR-001–007 accepted, ADR-008–010 proposed — review before field test).
+
 ---
 
 ## 9. Validation
