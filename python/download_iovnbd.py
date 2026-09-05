@@ -10,7 +10,8 @@ Usage:
   python python/download_iovnbd.py --out data/iovnbd      # custom out dir
   python python/download_iovnbd.py --unzip                # also unzip (default)
 """
-import argparse, os, sys, hashlib
+import argparse
+import sys
 from pathlib import Path
 import urllib.request
 
@@ -19,14 +20,27 @@ UNSYNC_URL = "https://media.githubusercontent.com/media/onyekpeu/IO-VNBD/master/
 SYNC_SIZE = 203606286  # from HEAD
 UNSYNC_SIZE = 214330231
 
-def download(url: str, dest: Path, expected_size: int):
+def download(url: str, dest: Path, expected_size: int) -> Path:
+    """Download a URL idempotently, skipping when the size already matches.
+
+    Args:
+        url: Source URL.
+        dest: Destination file path (parents are created).
+        expected_size: Expected size in bytes used for the skip check.
+
+    Returns:
+        The destination path.
+
+    Raises:
+        URLError: If the download fails.
+    """
     if dest.exists() and dest.stat().st_size == expected_size:
         print(f"[skip] {dest.name} already {expected_size} bytes")
         return dest
     print(f"[dl] {url} -> {dest} ({expected_size/1e6:.1f} MB)")
     dest.parent.mkdir(parents=True, exist_ok=True)
     # stream with progress
-    def report(block_num, block_size, total):
+    def report(block_num: int, block_size: int, total: int) -> None:
         if total > 0 and block_num % 100 == 0:
             pct = block_num * block_size / total * 100
             print(f"  {pct:.1f}%", end="\r")
@@ -36,7 +50,8 @@ def download(url: str, dest: Path, expected_size: int):
         print(f"[warn] size mismatch: got {dest.stat().st_size}, expected {expected_size}", file=sys.stderr)
     return dest
 
-def main():
+def main() -> None:
+    """Parse CLI args and fetch/unzip the requested IO-VNBD subsets."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--subset", choices=["Sync","all","Unsync"], default="Sync", help="which zips")
     ap.add_argument("--out", default="data/iovnbd", help="output dir for zips")
