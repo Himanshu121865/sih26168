@@ -22,7 +22,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
+from loguru import logger
 
+from python.core.runlog import init_runlog
 from python.core.signal import (
     find_column,
     gravity_align_linear,
@@ -131,50 +133,52 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--split", choices=["random", "stratified"], default="random",
                     help="must match the preprocess --split used for this checkpoint")
+    ap.add_argument("--log-dir", default=None, help="optional dir for a run log file")
     args = ap.parse_args()
 
+    init_runlog("audit", args.log_dir)
     _, val_files = rebuild_split(args.base, split=args.split)
-    print(f"[audit] val files ({len(val_files)}):")
+    logger.info(f"[audit] val files ({len(val_files)}):")
     for f in val_files:
-        print(f"  {Path(f).parent.name}/{Path(f).name}")
+        logger.info(f"  {Path(f).parent.name}/{Path(f).name}")
 
     sc = json.load(open(args.scaler))
     mean, std = np.array(sc["mean"]), np.array(sc["std"])
     device = torch.device(args.device)
     model = AVNetLite().to(device).eval()
     model.load_state_dict(torch.load(args.model, map_location=device))
-    print(f"[model] params {sum(p.numel() for p in model.parameters()):,} on {device}")
+    logger.info(f"[model] params {sum(p.numel() for p in model.parameters()):,} on {device}")
 
     rows = []
     for f in val_files:
         try:
             r = score_file(f, model, device, mean, std, batch=args.batch)
             if r is None:
-                print(f"[skip] {f} no windows")
+                logger.info(f"[skip] {f} no windows")
                 continue
             rows.append(r)
             short = f"{Path(f).parent.name}/{Path(f).name}"
-            print(
+            logger.info(
                 f"{short}: n={r['n']} RMSE={r['rmse']:.2f} mean_v={r['mean_v']:.1f} "
                 f"p95={r['p95_v']:.1f} stat={r['stat_frac']:.1%} dt={r['median_dt_ms']:.0f}ms | "
                 f"0-5={r['mse_0_5']**0.5:.2f} 5-15={r['mse_5_15']**0.5:.2f} >15={r['mse_gt15']**0.5:.2f}"
             )
         except Exception as e:
-            print(f"[err] {f}: {type(e).__name__}: {e}")
+            logger.error(f"[err] {f}: {type(e).__name__}: {e}")
 
     tot_n = sum(r["n"] for r in rows)
     recomb = sum(r["n"] * r["mse"] for r in rows) / tot_n
-    print(f"\nrecombined val MSE {recomb:.4f} (sanity vs train-log best ~1.729)")
+    logger.info(f"\nrecombined val MSE {recomb:.4f} (sanity vs train-log best ~1.729)")
     rows.sort(key=lambda r: r["n"] * r["mse"], reverse=True)
     top3 = sum(r["n"] * r["mse"] for r in rows[:3]) / sum(r["n"] * r["mse"] for r in rows)
-    print(f"top-3 files share of weighted MSE: {top3:.0%} → {'STRATIFY' if top3 > 0.6 else 'systemic (labels/capacity)'}")
+    logger.info(f"top-3 files share of weighted MSE: {top3:.0%} → {'STRATIFY' if top3 > 0.6 else 'systemic (labels/capacity)'}")
 
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     with open(args.out, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
-    print(f"[csv] {args.out}")
+    logger.info(f"[csv] {args.out}")
 
 
 if __name__ == "__main__":

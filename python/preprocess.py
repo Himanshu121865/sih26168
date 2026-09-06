@@ -28,6 +28,8 @@ from python.core.signal import (
     is_window_stationary as _core_is_stationary,
 )
 from python.core.scaler import TrainOnlyScaler
+from python.core.runlog import init_runlog
+from loguru import logger
 
 
 # robust column finder (sivaraman/prepare_training_data.py:205)
@@ -135,7 +137,7 @@ def stratified_split(
         members = sorted(buckets[key])
         if len(members) == 1:
             train_files.extend(members)
-            print(f"[strat] bucket {key}: n=1 -> train (singleton)")
+            logger.info(f"[strat] bucket {key}: n=1 -> train (singleton)")
             continue
         brng = np.random.default_rng(seed * 1000 + bi)
         perm = brng.permutation(len(members))
@@ -143,7 +145,7 @@ def stratified_split(
         tr_idx = set(perm[:n_tr].tolist())
         for i, m in enumerate(members):
             (train_files if i in tr_idx else val_files).append(m)
-        print(f"[strat] bucket {key}: n={len(members)} -> train {n_tr} val {len(members) - n_tr}")
+        logger.info(f"[strat] bucket {key}: n={len(members)} -> train {n_tr} val {len(members) - n_tr}")
     return train_files, val_files
 
 
@@ -159,18 +161,21 @@ def main():
     ap.add_argument("--out", default="data/processed")
     ap.add_argument("--scaler", default="python/scaler.json")
     ap.add_argument("--resume", action="store_true", help="resume from existing npy if interrupted (skip completed files)")
+    ap.add_argument("--log-dir", default=None, help="optional dir for a run log file")
     args = ap.parse_args()
+
+    init_runlog("preprocess", args.log_dir)
 
     base = Path("data/iovnbd/Synchronised V abd S datasets/Categorised IOVNB Dataset")
     s_files = sorted(glob.glob(str(base / "**/S-*.csv"), recursive=True))
     if args.subset == "1h":
         s_files = s_files[:3]
-    print(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz} resume={args.resume}")
+    logger.info(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz} resume={args.resume}")
 
     # resume: if output exists and is recent, skip (user can rm -rf data/processed to force)
     out_path = Path(args.out)
     if args.resume and (out_path / "train_windows.npy").exists() and (out_path / "val_windows.npy").exists():
-        print(f"[resume] {out_path}/train_windows.npy exists ({(out_path/'train_windows.npy').stat().st_size/1e9:.2f}GB), skipping preprocess. Use --no-resume or rm -rf {out_path} to force.")
+        logger.info(f"[resume] {out_path}/train_windows.npy exists ({(out_path/'train_windows.npy').stat().st_size/1e9:.2f}GB), skipping preprocess. Use --no-resume or rm -rf {out_path} to force.")
         return
 
     # split by trajectory (file), not window — prevents leakage (harsh/loaders.py:287)
@@ -183,14 +188,14 @@ def main():
         train_files_idx = set(perm_files[:n_train_files])
         train_files = [s_files[i] for i in range(len(s_files)) if i in train_files_idx]
         val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
-    print(f"[split:{args.split}] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
+    logger.info(f"[split:{args.split}] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
 
     # handle Ctrl-C gracefully: save what we have so far
     import signal
     interrupted = {"flag": False}
     def handle_sigint(sig, frame):
         interrupted["flag"] = True
-        print("\n[interrupt] Ctrl-C detected, will save partial progress and exit...")
+        logger.warning("\n[interrupt] Ctrl-C detected, will save partial progress and exit...")
     orig_handler = signal.signal(signal.SIGINT, handle_sigint)
 
     def process_file_list(file_list):
@@ -198,7 +203,7 @@ def main():
         all_v = []
         for idx_f, f in enumerate(file_list):
             if interrupted["flag"]:
-                print(f"[interrupt] stopping after {idx_f}/{len(file_list)} files, saving partial...")
+                logger.warning(f"[interrupt] stopping after {idx_f}/{len(file_list)} files, saving partial...")
                 break
             try:
                 df = load_phone_csv(f)
@@ -260,7 +265,7 @@ def main():
                 gps_speed_new = gps_speed_new[finite_mask]
 
                 if len(imu_new) < args.window:
-                    print(f"[skip] {Path(f).parent.name}/{Path(f).name}: too short after resample {len(imu_new)}")
+                    logger.info(f"[skip] {Path(f).parent.name}/{Path(f).name}: too short after resample {len(imu_new)}")
                     continue
 
                 windows = make_windows(imu_new.astype(np.float32), window=args.window, stride=args.stride)
@@ -286,9 +291,9 @@ def main():
                 if not hasattr(process_file_list, "all_stationary"):
                     process_file_list.all_stationary = []
                 process_file_list.all_stationary.append(stationary)
-                print(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms")
+                logger.info(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms")
             except Exception as e:
-                print(f"[err] {f}: {e}")
+                logger.error(f"[err] {f}: {e}")
                 import traceback; traceback.print_exc()
                 continue
         if not all_windows:
@@ -313,7 +318,7 @@ def main():
     if interrupted["flag"]:
         # save partial even if val empty, so resume can detect
         if 'X_train' in locals() and len(X_train) > 0:
-            print(f"[interrupt] saving partial train {X_train.shape} val {X_val.shape if 'X_val' in locals() and len(X_val)>0 else 'none'}")
+            logger.warning(f"[interrupt] saving partial train {X_train.shape} val {X_val.shape if 'X_val' in locals() and len(X_val)>0 else 'none'}")
             # still need scaler from what we have (train-only)
             _sc = TrainOnlyScaler()
             _sc.fit(X_train, train_files=train_files)
@@ -331,15 +336,15 @@ def main():
             if 'X_val' in locals() and len(X_val)>0:
                 np.save(out / "val_windows.npy", ((X_val - mean)/std).astype(np.float32))
                 np.save(out / "val_v.npy", v_val.astype(np.float32))
-            print(f"[interrupt] partial saved to {args.out}, re-run with --resume to skip or rm -rf to restart")
+            logger.warning(f"[interrupt] partial saved to {args.out}, re-run with --resume to skip or rm -rf to restart")
         return
 
-    print(f"[concat] train X {X_train.shape} v {v_train.shape} stationary {stat_train.sum()}/{len(stat_train)} | val X {X_val.shape} v {v_val.shape} stationary {stat_val.sum()}/{len(stat_val)}")
+    logger.info(f"[concat] train X {X_train.shape} v {v_train.shape} stationary {stat_train.sum()}/{len(stat_train)} | val X {X_val.shape} v {v_val.shape} stationary {stat_val.sum()}/{len(stat_val)}")
     if len(X_train) == 0 or len(X_val) == 0:
-        print("[err] no windows")
+        logger.error("[err] no windows")
         return
-    print(f"  train mean {X_train.mean(axis=(0,1))} std {X_train.std(axis=(0,1))}")
-    print(f"  val mean {X_val.mean(axis=(0,1))} std {X_val.std(axis=(0,1))}")
+    logger.info(f"  train mean {X_train.mean(axis=(0,1))} std {X_train.std(axis=(0,1))}")
+    logger.info(f"  val mean {X_val.mean(axis=(0,1))} std {X_val.std(axis=(0,1))}")
 
     # scaler from train only (train-only, sivaraman/agastya) via shared TrainOnlyScaler
     _scaler = TrainOnlyScaler()
@@ -352,7 +357,7 @@ def main():
     with open(args.scaler, "w") as _f:
         json.dump(_sj, _f, indent=2)
     mean = _scaler.mean; std = _scaler.std
-    print(f"[scaler] {args.scaler} mean {mean} std {std}")
+    logger.info(f"[scaler] {args.scaler} mean {mean} std {std}")
 
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     # For full 822k (3.9GB) we must not hold X_train and X_train_n (7.8GB) in RAM at once — stream to disk via memmap.
@@ -390,12 +395,12 @@ def main():
         # Free original arrays before exit to help Colab
         del X_train, X_val
         import gc; gc.collect()
-        print(f"[save] {out}/train_windows.npy via memmap (no OOM)")
+        logger.info(f"[save] {out}/train_windows.npy via memmap (no OOM)")
     except Exception as e:
-        print(f"[warn] memmap save failed ({e}), falling back to scaler-only + streaming.")
+        logger.warning(f"[warn] memmap save failed ({e}), falling back to scaler-only + streaming.")
         import traceback; traceback.print_exc()
         (out / ".streaming").touch()
-        print(f"[save] scaler only at {args.scaler}, train with streaming")
+        logger.info(f"[save] scaler only at {args.scaler}, train with streaming")
 
 if __name__ == "__main__":
     main()

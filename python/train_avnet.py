@@ -16,6 +16,8 @@ from torch.utils.data import DataLoader
 from python.datasets.iovnbd_dataset import IOVNBDWindowDataset
 from python.models.avnet import AVNetLite
 from python.core.training import augment_synthetic_bike as _bike_aug
+from python.core.runlog import init_runlog
+from loguru import logger
 
 def parse_args():
     ap = argparse.ArgumentParser()
@@ -33,6 +35,7 @@ def parse_args():
     ap.add_argument("--augment-yaw", action="store_true", help="random yaw rotation (heading-agnostic)")
     ap.add_argument("--augment-bike", action="store_true",
                     help="synthetic bike robustness: pothole 20%% + engine 30%% + lean ±25° (F5, no real bike data yet)")
+    ap.add_argument("--log-dir", default=None, help="optional dir for a run log file (<script>_<run_id>.log)")
     ap.add_argument("--seed", type=int, default=42)
     return ap.parse_args()
 
@@ -133,21 +136,22 @@ def eval_loss(model, loader, device):
 
 def main():
     args = parse_args()
+    init_runlog("train", args.log_dir)
     set_seed(args.seed)
     device = torch.device(args.device if torch.cuda.is_available() or args.device=="cpu" else "cpu")
     if args.device=="cuda" and not torch.cuda.is_available():
-        print("[warn] cuda not available, using cpu")
+        logger.warning("[warn] cuda not available, using cpu")
         device = torch.device("cpu")
-    print(f"[train] device {device} epochs {args.epochs} batch {args.batch} lr {args.lr} augment_yaw={args.augment_yaw} augment_bike={args.augment_bike} lambda_nll={args.lambda_nll}")
+    logger.info(f"[train] device {device} epochs {args.epochs} batch {args.batch} lr {args.lr} augment_yaw={args.augment_yaw} augment_bike={args.augment_bike} lambda_nll={args.lambda_nll}")
 
     train_ds = IOVNBDWindowDataset(args.train_windows, args.train_v)
     val_ds = IOVNBDWindowDataset(args.val_windows, args.val_v)
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=0)
-    print(f"[data] train {len(train_ds)} val {len(val_ds)}")
+    logger.info(f"[data] train {len(train_ds)} val {len(val_ds)}")
 
     model = AVNetLite().to(device)
-    print(f"[model] params {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"[model] params {sum(p.numel() for p in model.parameters()):,}")
 
     optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(optim, patience=5, factor=0.5)
@@ -161,13 +165,13 @@ def main():
         val_mse = eval_loss(model, val_loader, device)
         sched.step(val_mse)
         dt = time.time() - t0
-        print(f"[epoch {epoch}/{args.epochs}] train loss {tr_loss:.4f} (mse {tr_mse:.4f}) val MSE {val_mse:.4f} lr {optim.param_groups[0]['lr']:.2e} {dt:.1f}s")
+        logger.info(f"[epoch {epoch}/{args.epochs}] train loss {tr_loss:.4f} (mse {tr_mse:.4f}) val MSE {val_mse:.4f} lr {optim.param_groups[0]['lr']:.2e} {dt:.1f}s")
         if val_mse < best_val:
             best_val = val_mse
             torch.save(model.state_dict(), out_path)
-            print(f"  [save] {out_path} best {best_val:.4f}")
+            logger.info(f"  [save] {out_path} best {best_val:.4f}")
 
-    print(f"[done] best val {best_val:.4f} saved to {out_path}")
+    logger.info(f"[done] best val {best_val:.4f} saved to {out_path}")
 
 if __name__ == "__main__":
     main()

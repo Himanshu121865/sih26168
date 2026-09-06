@@ -2,6 +2,7 @@ package com.sih26168.dr.io
 
 import android.content.Context
 import android.os.Environment
+import com.sih26168.dr.engine.BuildInfo
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -19,10 +20,26 @@ class CsvLogger(context: Context) {
     private var file: File? = null
     var enabled = false
 
-    fun start() {
+    /**
+     * Start a new log file.
+     *
+     * Row 1 is the stable header (scoring reads it — never reorder). Row 2 is
+     * a `#` run comment with build identity for triage; parsers must skip
+     * `#`-prefixed lines (see `docs/INTERFACE_CONTRACTS.md` §3).
+     *
+     * @param specVersion window-spec version (BuildInfo.SPEC_VERSION).
+     * @param modelHash short asset hash of model.tflite, or "?" if unknown.
+     * @param scalerHash short asset hash of scaler.json, or "?" if unknown.
+     */
+    fun start(
+        specVersion: Int = BuildInfo.SPEC_VERSION,
+        modelHash: String = "?",
+        scalerHash: String = "?",
+    ) {
         val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         file = File(dir, "dr_log_$ts.csv").apply {
             writeText("timestamp_s,x_pred,y_pred,p_gnss_lat,p_gnss_lon,v_ai,sigma_v,phi_rad,p_bike,mode\n")
+            appendText("# run spec=v$specVersion model=$modelHash scaler=$scalerHash\n")
         }
         enabled = true
     }

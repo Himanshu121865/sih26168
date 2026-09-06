@@ -36,6 +36,8 @@ import torch
 from python.models.avnet import AVNetLite
 from python.models.lean_estimator import LeanEstimator
 from python.utils.zupt import StationaryDetector
+from python.core.runlog import init_runlog
+from loguru import logger
 
 # Single source of truth for Lie group math (F2): canonical impl lives in
 # python/utils/lie_group.py. Harness re-exports the same symbols so the
@@ -311,11 +313,11 @@ def run_replay(model_path, n_windows=600, start=None, lean_mode="auto", verbose=
         "inekf_drift_pct": pct(dist_ekf),
     }
     if verbose:
-        print(f"[harness] segment {n_windows} windows (60s) total_dist {total_dist:.1f}m mode={lean_mode} q_acc={q_acc}")
-        print(f"  naive  final {metrics['naive_final_m']:7.1f}m  {metrics['naive_drift_pct']:6.1f}%")
-        print(f"  avnet  final {metrics['avnet_final_m']:7.1f}m  {metrics['avnet_drift_pct']:6.1f}%")
-        print(f"  inekf  final {metrics['inekf_final_m']:7.1f}m  {metrics['inekf_drift_pct']:6.1f}%")
-        print(f"  mean |v_pred-v_gt| {np.abs(v_pred - v_gt).mean():.3f} m/s | mean σ_v {sig_v.mean():.3f} "
+        logger.info(f"[harness] segment {n_windows} windows (60s) total_dist {total_dist:.1f}m mode={lean_mode} q_acc={q_acc}")
+        logger.info(f"  naive  final {metrics['naive_final_m']:7.1f}m  {metrics['naive_drift_pct']:6.1f}%")
+        logger.info(f"  avnet  final {metrics['avnet_final_m']:7.1f}m  {metrics['avnet_drift_pct']:6.1f}%")
+        logger.info(f"  inekf  final {metrics['inekf_final_m']:7.1f}m  {metrics['inekf_drift_pct']:6.1f}%")
+        logger.info(f"  mean |v_pred-v_gt| {np.abs(v_pred - v_gt).mean():.3f} m/s | mean σ_v {sig_v.mean():.3f} "
               f"| mean φ {np.degrees(np.abs(phi_arr)).mean():.1f}° | mean p_bike {p_bike_arr.mean():.2f} "
               f"| P_trace {float(torch.trace(ekf.P)):.3g} | zupt {n_zupt}/{n_windows}")
     metrics["q_acc"] = float(q_acc)
@@ -337,8 +339,8 @@ def test_lean():
     v_y_car, scale_car = lean.nhc_correction(v_fwd, phi, th.tensor([0.2]))
     assert float(v_y_car[0]) == 0.0, "car branch must keep v_lat=0"
     assert float(scale_car[0]) == 1.0
-    print(f"[test-lean] PASS — bike φ=30°: v_lat={float(v_y[0]):.3f} m/s (expected {expected:.3f}), R_scale={float(scale[0]):.3f}")
-    print(f"[test-lean] PASS — car fallback: v_lat=0, R_scale=1.0")
+    logger.info(f"[test-lean] PASS — bike φ=30°: v_lat={float(v_y[0]):.3f} m/s (expected {expected:.3f}), R_scale={float(scale[0]):.3f}")
+    logger.info(f"[test-lean] PASS — car fallback: v_lat=0, R_scale=1.0")
 
 
 def main():
@@ -353,7 +355,10 @@ def main():
     ap.add_argument("--no-variance-zupt", action="store_true", help="disable variance detector, use speed heuristic only")
     ap.add_argument("--test-lean", action="store_true")
     ap.add_argument("--csv", default="reports/inekf_vs_avnet.csv")
+    ap.add_argument("--log-dir", default=None, help="optional dir for a run log file")
     args = ap.parse_args()
+
+    init_runlog("harness", args.log_dir)
 
     if args.test_lean:
         test_lean()
@@ -370,7 +375,7 @@ def main():
             f.write("trajectory,naive_drift_pct,avnet_drift_pct,inekf_drift_pct\n")
         f.write(f"val_start{metrics['start']}_{metrics['segment_windows']}w_{metrics['total_dist_m']:.0f}m,{metrics['naive_drift_pct']:.2f},"
                 f"{metrics['avnet_drift_pct']:.2f},{metrics['inekf_drift_pct']:.2f}\n")
-    print(f"[csv] appended {args.csv}")
+    logger.info(f"[csv] appended {args.csv}")
 
 
 if __name__ == "__main__":

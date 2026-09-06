@@ -20,6 +20,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.sih26168.dr.engine.DrPipeline
+import com.sih26168.dr.engine.BuildInfo
 import com.sih26168.dr.engine.SeamlessHandler.FusionMode
 import com.sih26168.dr.io.CsvLogger
 import com.sih26168.dr.map.OfflineRegionManager
@@ -69,6 +70,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var pendingCenter: LatLng? = null
     private var loadingOverlay: android.view.View? = null
     private var firstFixDone = false
+    /** Short asset hashes for the health sheet; computed once on an IO thread. */
+    @Volatile private var modelHashShort: String = "…"
+    @Volatile private var scalerHashShort: String = "…"
 
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
 
@@ -187,6 +191,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
         lifecycleScope.launch(Dispatchers.IO) {
             try { pipeline.setRoadGraph(RoadGraph.load(this@MainActivity)) } catch (_: Exception) { /* no bundled graph yet */ }
+            // Asset identity for the health sheet (Tier 3) — cheap, once, off-main.
+            modelHashShort = BuildInfo.assetHash12(this@MainActivity, "model.tflite")
+            scalerHashShort = BuildInfo.assetHash12(this@MainActivity, "scaler.json")
         }
     }
 
@@ -347,6 +354,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 pipeline.avnet.sigmaV.toFloat(),
                 pipeline.lastStill,
                 pipeline.motionConfirmMsPublic,
+            ) + "\n" + getString(
+                R.string.health_line,
+                BuildInfo.SPEC_VERSION,
+                modelHashShort,
+                scalerHashShort,
             )
             if (isValidFix) {
                 // Drop initial 0,0 if it slipped in, and avoid duplicate last point

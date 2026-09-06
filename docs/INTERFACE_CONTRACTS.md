@@ -30,10 +30,11 @@ only with a reviewer from the other track (CODEOWNERS enforces this).
 
 - **Producer:** `android/.../io/CsvLogger.kt`.
 - **Consumer:** manual scoring + `reports/` summaries.
-- **Contract:** header
+- **Contract:** row 1 header
   `timestamp_s,x_pred,y_pred,p_gnss_lat,p_gnss_lon,v_ai,sigma_v,phi_rad,p_bike,mode`
-  with `mode ∈ {GNSS, INS}` (`FusionMode.displayName`). Append-only; never
-  rename/reorder columns — old logs must stay parseable.
+  with `mode ∈ {GNSS, INS}` (`FusionMode.displayName`); row 2 is a `# run ...`
+  comment with build identity (spec/model/scaler — parsers must skip `#` lines).
+  Append-only; never rename/reorder columns — old logs must stay parseable.
 
 ## 4. Drift metrics JSON — proposal numbers
 

@@ -24,9 +24,12 @@ import argparse, json
 from pathlib import Path
 import numpy as np
 import torch
+from loguru import logger
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+from python.core.runlog import init_runlog
 
 from python.datasets.iovnbd_dataset import IOVNBDWindowDataset
 from python.models.avnet import AVNetLite
@@ -118,10 +121,10 @@ def generate_drift_plot(val_v_path="data/processed/val_v.npy", model_path=None, 
     drift_pct_ai = final_ai / total_dist * 100
     drift_pct_map = final_map / total_dist * 100
 
-    print(f"[eval] segment {seg_len} windows (60s) total_dist {total_dist:.1f}m")
-    print(f"  naive final {final_naive:.1f}m drift {final_naive/total_dist*100:.1f}%")
-    print(f"  AI final {final_ai:.1f}m drift {drift_pct_ai:.1f}%")
-    print(f"  AI+map final {final_map:.1f}m drift {drift_pct_map:.1f}%")
+    logger.info(f"[eval] segment {seg_len} windows (60s) total_dist {total_dist:.1f}m")
+    logger.info(f"  naive final {final_naive:.1f}m drift {final_naive/total_dist*100:.1f}%")
+    logger.info(f"  AI final {final_ai:.1f}m drift {drift_pct_ai:.1f}%")
+    logger.info(f"  AI+map final {final_map:.1f}m drift {drift_pct_map:.1f}%")
 
     # plot
     Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
@@ -139,7 +142,7 @@ def generate_drift_plot(val_v_path="data/processed/val_v.npy", model_path=None, 
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=200)
-    print(f"[plot] saved {plot_path}")
+    logger.info(f"[plot] saved {plot_path}")
 
     # also save metrics
     metrics = {
@@ -256,9 +259,9 @@ def generate_drift_plot_2d(val_v_path="data/processed/val_v.npy", model_path=Non
     final_ai = float(np.linalg.norm(ai_xy[-1] - gt_xy[-1]))
     final_naive = float(np.linalg.norm(naive_xy[-1] - gt_xy[-1]))
 
-    print(f"[eval-2d] seg {seg_len} total {total_d:.1f}m")
-    print(f"  naive final {final_naive:.1f}m ATE {ate_naive:.2f}m drift {_drift_pct(final_naive, total_d):.1f}%")
-    print(f"  AI final {final_ai:.1f}m ATE {ate_ai:.2f}m (aligned {ate_ai_aligned:.2f}) RTE60 {rte_ai:.2f}m drift {_drift_pct(final_ai, total_d):.1f}%")
+    logger.info(f"[eval-2d] seg {seg_len} total {total_d:.1f}m")
+    logger.info(f"  naive final {final_naive:.1f}m ATE {ate_naive:.2f}m drift {_drift_pct(final_naive, total_d):.1f}%")
+    logger.info(f"  AI final {final_ai:.1f}m ATE {ate_ai:.2f}m (aligned {ate_ai_aligned:.2f}) RTE60 {rte_ai:.2f}m drift {_drift_pct(final_ai, total_d):.1f}%")
 
     Path(plot_path).parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
@@ -278,7 +281,7 @@ def generate_drift_plot_2d(val_v_path="data/processed/val_v.npy", model_path=Non
     ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(plot_path, dpi=200)
-    print(f"[plot] saved {plot_path}")
+    logger.info(f"[plot] saved {plot_path}")
 
     metrics = {
         "mode": "2d",
@@ -307,7 +310,10 @@ def main():
                     help="1d=legacy screening demo (default, byte-identical); 2d=real ATE/RTE, no fake map")
     ap.add_argument("--gps-track", default=None, help="optional CSV with lat/lon for true 2D GT (else gyro heading)")
     ap.add_argument("--scaler", default="python/scaler.json")
+    ap.add_argument("--log-dir", default=None, help="optional dir for a run log file")
     args = ap.parse_args()
+
+    init_runlog(f"eval-{args.mode}", args.log_dir)
 
     # also compute MSE if model exists
     if args.model and Path(args.model).exists():
@@ -318,7 +324,7 @@ def main():
         model = AVNetLite().to(device)
         model.load_state_dict(torch.load(args.model, map_location=device))
         mse = eval_mse(model, loader, device)
-        print(f"[mse] val MSE {mse:.4f} RMSE {mse**0.5:.4f} m/s")
+        logger.info(f"[mse] val MSE {mse:.4f} RMSE {mse**0.5:.4f} m/s")
 
     if args.mode == "2d":
         generate_drift_plot_2d(args.val_v, args.model, args.plot, args.gps_track,
