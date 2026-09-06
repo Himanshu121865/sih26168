@@ -1,5 +1,10 @@
 # SIH26168 — Intelligent Dead Reckoning for GNSS-Denied Navigation
 
+![Python CI](https://github.com/Himanshu121865/sih26168/actions/workflows/python.yml/badge.svg)
+![Android CI](https://github.com/Himanshu121865/sih26168/actions/workflows/android.yml/badge.svg)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![Release](https://img.shields.io/github/v/release/Himanshu121865/sih26168)
+
 **ISRO • Software • SIH26168 • Deadline: 20 Sep 2026**
 
 ## Clone and Use (30 seconds)

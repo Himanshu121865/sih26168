@@ -22,4 +22,5 @@
 
 - [ ] CI green
 - [ ] Docs/ADR updated (or N/A — docs-only change)
+- [ ] CHANGELOG.md entry added (or N/A — docs-only change)
 - [ ] Interface change reviewed by the other track (or N/A)
