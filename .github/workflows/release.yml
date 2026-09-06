@@ -25,6 +25,8 @@ jobs:
         with:
           gradle-version: 8.7
       - run: gradle :app:assembleDebug --project-dir android
+        env:
+          APP_VERSION: ${{ github.ref_name }}
       # TODO(signing): add keystore secrets (STORE_FILE/STORE_PASSWORD/KEY_ALIAS/
       # KEY_PASSWORD) and switch to :app:assembleRelease for a signed artifact.
       - run: |

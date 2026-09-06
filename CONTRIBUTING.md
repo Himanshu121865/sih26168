@@ -10,12 +10,25 @@ Two tracks, one `main`. Android crew owns `android/`; AI crew owns `python/` +
 **Android track** — Android Studio Hedgehog+, JDK 17. Open the `android/`
 folder, let Gradle sync, run on a real device (emulator IMUs are too clean).
 No `gradlew` wrapper is checked in; use Studio or system Gradle 8.7:
-`gradle :app:assembleDebug --project-dir android`.
+`gradle :app:assembleDebug --project-dir android` (or `make apk`).
 
 **AI track** — Colab T4 GPU. Open
 `https://colab.research.google.com/github/Himanshu121865/sih26168/blob/main/sih26168_colab.ipynb`,
 Factory reset runtime, Run all. Local Python is for lint/compile only
 (no torch/numpy here); heavy runs always happen on Colab.
+
+## What runs where
+
+| Command | Where | Needs |
+|---------|-------|-------|
+| `make smoke` | anywhere (this box OK) | stdlib python3 |
+| `make test` | Colab / CI | numpy pandas loguru pytest |
+| `make audit/train/eval/harness/export` | Colab T4 | torch + `data/` + checkpoint |
+| `make apk` | Studio / JDK17 box | Android SDK, Gradle 8.7 |
+| `make release-check` | anywhere | git |
+
+If a command fails, check this table first: 9/10 "broken env" reports are a
+command run in the wrong column.
 
 ## Branching
 

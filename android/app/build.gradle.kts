@@ -7,12 +7,16 @@ android {
     namespace = "com.sih26168.dr"
     compileSdk = 34
 
+    // Single version truth: git tag (CI passes APP_VERSION=v* on release).
+    // Local builds read "0.1.0-dev"; pyproject version is bumped at tag time.
+    val appVersion: String = System.getenv("APP_VERSION") ?: "0.1.0-dev"
+
     defaultConfig {
         applicationId = "com.sih26168.dr"
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1"
+        versionName = appVersion
     }
 
     buildTypes {
