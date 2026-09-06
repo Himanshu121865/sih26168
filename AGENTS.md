@@ -399,6 +399,32 @@ Planned (see README §12):
 | Alignment after phone rotate | 12 | Re-calib on `gyro energy < thresh && speed>15kmph` for 2s; test rotate 90° mid-drive. |
 | No tunnel access | 11-12 | Mask GNSS programmatically — valid per PS. |
 
+## Next — Window-Path Hardening (planned 2026-09-06, work starts tomorrow)
+
+The IMU window path (`raw CSV → resample → gravity-remove → normalize → (200,6)`)
+is the frozen core: every past silent breakage lived here, never in modeling ideas.
+Decisions locked: train with gEst-style gravity removal (full retrain accepted);
+fingerprinting goes full (hash + refuse, not log-only).
+
+- **P1 — Gravity unification (needs retrain):** `preprocess.py` + `iovnbd_dataset.py`
+  recompute gravity with the live low-pass (`g += 0.02·(acc−g)`, init `[0,0,9.81]`)
+  instead of reading gravity columns; columns stay as cross-check only.
+  New `core/signal.estimate_gravity_lowpass()` is the single implementation.
+  Fold into the Step-2 branch run — one Colab cycle, not two (see `docs/STEP2_TRAINING_PLAN.md`).
+- **P2 — Versioned spec + fingerprints:** new `docs/WINDOW_SPEC.md` (v1 = current,
+  v2 = unified); `scaler.json` gains `spec_version` + `sha256`; `export_tflite.py`
+  stamps TFLite metadata and refuses mismatched pairs; Android startup compares
+  asset fingerprint vs expected spec and refuses inference on mismatch (fail loud).
+  `AVNetInference.push` gains NaN/size guards.
+- **P3 — Cross-language golden vectors:** fixed raw snippet → expected normalized
+  window bytes, checked by `tests/test_window_golden.py` AND Kotlin `WindowGoldenTest`
+  on the same asset file; lean `mean|φ|<10°` rides along as the 38°-bug tripwire.
+- **P4 — Timestamp discipline:** preprocess logs per-file `median_dt` + gaps, rejects
+  files with >5% gaps (S-M 51ms / S4 80ms get flagged); Android `onImu` rejects
+  `dt` spikes >50ms instead of feeding the ring.
+- **Order:** P2 docs+plumbing (no retrain) → P1+P4 + Step-2 branch retrain (one Colab
+  run) → P3 vectors from the new pipeline → Kotlin guards + refuse-to-run (Studio gate).
+
 ## References
 
 - PS: `vedantchalke36/sih-2026-problem-statements/ps_2026/SIH26168.md`
