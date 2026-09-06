@@ -39,10 +39,13 @@ class TrainOnlyScaler:
         # reduce over N and window
         axes = tuple(range(X_train.ndim - 1))
         self.mean = X_train.mean(axis=axes)
-        self.std = X_train.std(axis=axes) + 1e-6
-        # PASS_THROUGH for binary flags (std<1e-8)
+        # PASS_THROUGH for binary flags: mask on RAW std first — adding the
+        # epsilon before the check (as before) made the branch unreachable.
+        raw_std = X_train.std(axis=axes)
+        flat = raw_std < 1e-8
+        self.std = raw_std + 1e-6
         for i in range(len(self.std)):
-            if self.std[i] < 1e-8:
+            if flat[i]:
                 self.mean[i] = 0
                 self.std[i] = 1
         self.fitted = True

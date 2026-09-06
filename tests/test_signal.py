@@ -58,7 +58,7 @@ def test_gravity_align_linear_subtracts() -> None:
     """Linear acc equals raw minus gravity estimate."""
     acc = np.array([[0.0, 0.0, 10.0]])
     grav = np.array([[0.0, 0.0, 9.81]])
-    assert gravity_align_linear(acc, grav).tolist() == pytest.approx([[0.0, 0.0, 0.19]])
+    assert gravity_align_linear(acc, grav) == pytest.approx(np.array([[0.0, 0.0, 0.19]]))
 
 
 @pytest.mark.parametrize("hz", [50, 100])
