@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-    <solid android:color="#FFFFFF" />
-    <corners android:topLeftRadius="20dp" android:topRightRadius="20dp" />
+    <!-- Fallback pre-dynamic-color devices; MainActivity overrides with dynamic color. -->
+    <solid android:color="@color/primary" />
+    <corners android:topLeftRadius="28dp" android:topRightRadius="28dp" />
 </shape>

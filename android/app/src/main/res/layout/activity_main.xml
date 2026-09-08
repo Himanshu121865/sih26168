@@ -11,20 +11,36 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Status chip, top-left, Maps-style -->
+    <!-- Status chip, top-left — white pill with purple outline -->
     <TextView
         android:id="@+id/statusChip"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_marginTop="40dp"
         android:layout_marginStart="16dp"
-        android:paddingHorizontal="14dp"
-        android:paddingVertical="7dp"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="8dp"
         android:background="@drawable/bg_status_chip"
         android:text="@string/mode_gnss"
-        android:textAppearance="?attr/textAppearanceLabelMedium"
-        android:textColor="#1B1B1B"
-        android:elevation="4dp" />
+        android:textAppearance="?attr/textAppearanceLabelLarge"
+        android:textStyle="bold"
+        android:textColor="?attr/colorPrimary"
+        android:elevation="6dp" />
+
+    <!-- Recenter + follow FAB — separate button, left of locate, same row -->
+    <com.google.android.material.floatingactionbutton.FloatingActionButton
+        android:id="@+id/btnRecenter"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginEnd="92dp"
+        android:layout_marginBottom="124dp"
+        android:contentDescription="@string/recenter"
+        android:src="@android:drawable/ic_menu_compass"
+        app:fabSize="mini"
+        app:tint="?attr/colorPrimary"
+        app:backgroundTint="?attr/colorSurface"
+        android:elevation="6dp" />
 
     <!-- Locate FAB, anchored above bottom sheet so never covered -->
     <com.google.android.material.floatingactionbutton.FloatingActionButton
@@ -33,50 +49,93 @@
         android:layout_height="wrap_content"
         android:layout_gravity="bottom|end"
         android:layout_marginEnd="16dp"
-        android:layout_marginBottom="96dp"
+        android:layout_marginBottom="120dp"
         android:contentDescription="@string/locate"
         android:src="@android:drawable/ic_menu_mylocation"
-        app:tint="@android:color/white"
-        android:elevation="6dp" />
+        app:tint="?attr/colorOnPrimary"
+        app:backgroundTint="?attr/colorPrimary"
+        android:elevation="8dp" />
 
-    <!-- Bottom sheet (Maps-style) -->
+    <!-- Bottom sheet — vibrant gradient, rounded top, speed hero stat -->
     <LinearLayout
         android:id="@+id/bottomSheet"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:background="@drawable/bg_bottom_sheet"
-        android:elevation="8dp"
+        android:elevation="12dp"
         android:orientation="vertical"
-        android:paddingHorizontal="20dp"
-        android:paddingTop="14dp"
-        android:paddingBottom="24dp">
+        android:paddingHorizontal="24dp"
+        android:paddingTop="18dp"
+        android:paddingBottom="28dp">
 
-        <TextView
-            android:id="@+id/sheetSummary"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/speed_placeholder"
-            android:textAppearance="?attr/textAppearanceTitleMedium"
-            android:textColor="#1B1B1B" />
+        <!-- Drag-handle affordance -->
+        <View
+            android:layout_width="36dp"
+            android:layout_height="4dp"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginBottom="14dp"
+            android:background="#55FFFFFF" />
 
-        <TextView
-            android:id="@+id/sheetDetail"
-            android:layout_width="wrap_content"
+        <!-- Hero: speed big + drift chip beside it -->
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="@string/speed_placeholder"
-            android:textAppearance="?attr/textAppearanceBodyMedium"
-            android:textColor="#5F6368"
-            android:visibility="visible" />
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/sheetSummary"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="@string/speed_placeholder"
+                android:textAppearance="?attr/textAppearanceDisplaySmall"
+                android:textStyle="bold"
+                android:textColor="@color/onPrimary" />
+
+            <TextView
+                android:id="@+id/driftChip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="12dp"
+                android:paddingVertical="6dp"
+                android:background="@drawable/bg_speed_chip"
+                android:textAppearance="?attr/textAppearanceLabelMedium"
+                android:textStyle="bold"
+                android:textColor="@color/onPrimary" />
+        </LinearLayout>
+
+        <!-- Detail stats card: translucent white on the gradient -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="#26FFFFFF"
+            app:cardCornerRadius="16dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp">
+
+            <TextView
+                android:id="@+id/sheetDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingHorizontal="14dp"
+                android:paddingVertical="10dp"
+                android:text="@string/speed_placeholder"
+                android:textAppearance="?attr/textAppearanceBodySmall"
+                android:textColor="#E6FFFFFF"
+                android:lineSpacingExtra="3dp"
+                android:visibility="visible" />
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 
-    <!-- Loading overlay — covers map until first fix + style ready -->
+    <!-- Loading overlay — light gradient matching the vibrant theme -->
     <FrameLayout
         android:id="@+id/loadingOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:background="#F2F0EEE6"
+        android:background="@drawable/bg_loading"
         android:clickable="true"
         android:focusable="true"
         android:elevation="16dp">
@@ -92,8 +151,10 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:indeterminate="true"
+                app:indicatorColor="?attr/colorPrimary"
                 app:indicatorSize="48dp"
-                app:trackThickness="4dp" />
+                app:trackThickness="4dp"
+                app:trackColor="?attr/colorPrimaryContainer" />
 
             <TextView
                 android:id="@+id/loadingText"
@@ -102,7 +163,7 @@
                 android:layout_marginTop="16dp"
                 android:text="Getting location…"
                 android:textAppearance="?attr/textAppearanceTitleMedium"
-                android:textColor="#1B1B1B" />
+                android:textColor="@color/onBackground" />
 
             <TextView
                 android:layout_width="wrap_content"
@@ -110,7 +171,7 @@
                 android:layout_marginTop="4dp"
                 android:text="Starting sensors &amp; map"
                 android:textAppearance="?attr/textAppearanceBodyMedium"
-                android:textColor="#5F6368" />
+                android:textColor="@color/onSurfaceVariant" />
         </LinearLayout>
     </FrameLayout>
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 vibrant light palette — Google-Material expressives -->
+    <color name="primary">#6750A4</color>
+    <color name="onPrimary">#FFFFFF</color>
+    <color name="primaryContainer">#EADDFF</color>
+    <color name="onPrimaryContainer">#21005D</color>
+    <color name="secondary">#625B71</color>
+    <color name="onSecondary">#FFFFFF</color>
+    <color name="secondaryContainer">#E8DEF8</color>
+    <color name="onSecondaryContainer">#1D192B</color>
+    <color name="tertiary">#7D5260</color>
+    <color name="onTertiary">#FFFFFF</color>
+    <color name="tertiaryContainer">#FFD8E4</color>
+    <color name="onTertiaryContainer">#31111D</color>
+
+    <color name="background">#FFFBFE</color>
+    <color name="onBackground">#1C1B1F</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="onSurface">#1C1B1F</color>
+    <color name="onSurfaceVariant">#49454F</color>
+    <color name="outline">#79747E</color>
+
+    <!-- Semantic / status -->
+    <color name="gnssBlue">#0B57D0</color>
+    <color name="gnssBlueContainer">#D3E3FD</color>
+    <color name="insOrange">#B06000</color>
+    <color name="insOrangeContainer">#FFE0B2</color>
+    <color name="successGreen">#146C2E</color>
+    <color name="successGreenContainer">#C4EED0</color>
+
+    <!-- Track on map -->
+    <color name="trackColor">#6750A4</color>
+</resources>
