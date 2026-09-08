@@ -12,6 +12,13 @@ import kotlin.math.max
  */
 class DrPipeline(context: Context, useGravity: Boolean = true) {
 
+    init {
+        // P2 refuse-to-run: a scaler/model pair from a mismatched window spec
+        // throws here — silent degraded inference is worse than a crash with
+        // a clear message. (Scaler's own init also verifies the fingerprint.)
+        WindowSpecGuard.verifyScaler(context)
+    }
+
     val scaler = Scaler(context)
     val avnet = AVNetInference(context)
     val lean = LeanDetector()
@@ -44,11 +51,23 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
         const val V_DEADBAND = 0.15                // m/s — below this, don't move position (walking ~0.8+)
         const val V_STEP_LIMIT = 0.5               // max |Δv| per 0.1s tick (~5 m/s^2)
         const val V_SMOOTH_ALPH = 0.25             // ~0.35s low-pass at 10Hz
+        // GNSS sanity gate: GPS ground-speed below this (m/s) means we are NOT moving —
+        // overrides AI speed. Margin 0.3 covers GPS noise (~0.1-0.2 m/s) + walking start-up.
+        const val GNSS_STILL_SPEED = 0.3
+        // Latched gate: once GPS says still, AI speed stays blocked until GPS itself says
+        // moving (or this max hold expires — guards against a stale gate after GPS dies).
+        // Indoor GPS flaps INS<->GNSS every ~1.5s; a short timer hold leaked through every
+        // flap (34m fake distance measured). Latch + explicit clear is flap-proof.
+        const val GNSS_STILL_MAX_HOLD_MS = 30_000.0
     }
     private var velSmooth = 0.0
     private var lastModelV = 0.0
     private var motionConfirmMs = 0.0
     private var zuptHoldMsRem = 0.0
+    private var gnssStillLatched = false
+    private var gnssStillDeadlineMs = 0.0
+    /** Engine clock (s), advanced in [onImu] — same base used for gate deadlines. */
+    private var engineS = 0.0
 
     /** Wire the offline road graph when available (bundled asset or extracted). */
     fun setRoadGraph(g: RoadGraph?) {
@@ -56,8 +75,20 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
         matcher = g?.let { HmmMapMatcher(it) }
     }
 
+    /** Called from the GNSS callback: GPS ground speed (m/s) says we are standing still. */
+    fun onGnssStill() {
+        gnssStillLatched = true
+        gnssStillDeadlineMs = engineS * 1000.0 + GNSS_STILL_MAX_HOLD_MS
+    }
+
+    /** Called from the GNSS callback: GPS reports real movement — clear the still latch. */
+    fun onGnssMoving() {
+        gnssStillLatched = false
+    }
+
     /** One raw IMU sample (acc m/s^2 incl. gravity, gyro rad/s) @100Hz. */
     fun onImu(acc: DoubleArray, gyro: DoubleArray, dt: Double) {
+        engineS += dt
         alignment.updateAccel(acc)
         lean.update(acc)
         // CRITICAL: model was trained on linear acc (acc - gravity), not raw.
@@ -88,7 +119,13 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             } else if (motionConfirmMs < MOTION_CONFIRM_MS) {
                 motionConfirmMs += 100.0
             }
-            val trustModel = motionConfirmMs >= MOTION_CONFIRM_MS && zuptHoldMsRem <= 0.0
+            // GPS-still latch: blocked until a moving fix clears it. While latched, also
+            // reset motion-confirm so un-gating needs a fresh sustained-motion window —
+            // otherwise the first tick after un-gate resumes instantly (leak observed).
+            val gnssGateActive = gnssStillLatched && engineS * 1000.0 < gnssStillDeadlineMs
+            if (gnssGateActive) motionConfirmMs = 0.0
+            if (!gnssGateActive) gnssStillLatched = false
+            val trustModel = motionConfirmMs >= MOTION_CONFIRM_MS && zuptHoldMsRem <= 0.0 && !gnssGateActive
 
             val vSourced = if (trustModel) rawV else 0.0
 
