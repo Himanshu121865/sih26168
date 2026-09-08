@@ -54,11 +54,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var statusChip: TextView
     private lateinit var sheetSummary: TextView
     private lateinit var sheetDetail: TextView
+    private lateinit var driftChip: TextView
     private lateinit var pipeline: DrPipeline
     private lateinit var logger: CsvLogger
     private lateinit var offline: OfflineRegionManager
 
     private var source: GeoJsonSource? = null
+    private var posSource: GeoJsonSource? = null
+    /** Follow mode: camera re-centers on the fused dot every UI tick until the user pans. */
+    private var followMode = false
     private val track = ArrayList<Point>()
     private var lastSensorTs = 0L
     private var tStart = 0L
@@ -70,6 +74,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var pendingCenter: LatLng? = null
     private var loadingOverlay: android.view.View? = null
     private var firstFixDone = false
+    /** True once ANY fix (cached or fresh) arrived — before that the chip must not claim INS. */
+    private var everHadFix = false
     /** Short asset hashes for the health sheet; computed once on an IO thread. */
     @Volatile private var modelHashShort: String = "…"
     @Volatile private var scalerHashShort: String = "…"
@@ -78,15 +84,38 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Material You: adopt the wallpaper-derived color scheme (API 31+) so the
+        // app matches the phone theme (e.g. orange) instead of a hardcoded palette.
+        com.google.android.material.color.DynamicColors.applyToActivityIfAvailable(this)
         MapLibre.getInstance(this)
         setContentView(R.layout.activity_main)
+        // Drawables can't read theme attrs — tint the sheet with the DYNAMIC
+        // (wallpaper-derived) primary at runtime so it matches the phone theme
+        // (e.g. orange) instead of the static purple fallback. Flat solid fill.
+        val sheet = findViewById<android.view.View>(R.id.bottomSheet)
+        val dynPrimary = com.google.android.material.color.MaterialColors
+            .getColor(sheet, com.google.android.material.R.attr.colorPrimary)
+        val radius = 28f * resources.displayMetrics.density
+        val gd = android.graphics.drawable.GradientDrawable().apply {
+            setColor(dynPrimary)
+            cornerRadii = floatArrayOf(radius, radius, 0f, 0f, 0f, 0f, radius, radius)
+        }
+        sheet.background = gd
 
         statusChip = findViewById(R.id.statusChip)
         sheetSummary = findViewById(R.id.sheetSummary)
         sheetDetail = findViewById(R.id.sheetDetail)
+        driftChip = findViewById(R.id.driftChip)
         loadingOverlay = findViewById(R.id.loadingOverlay)
         pipeline = DrPipeline(this, useGravity = true)  // raw Android IMU keeps gravity
         logger = CsvLogger(this)
+        // Health-sheet identity: log what's ACTUALLY in assets, not what the
+        // APK was compiled against (they can differ during staged rollouts).
+        logger.start(
+            specVersion = pipeline.scaler.specVersion,
+            modelHash = BuildInfo.assetHash12(this, "model.tflite"),
+            scalerHash = BuildInfo.assetHash12(this, "scaler.json"),
+        )
         offline = OfflineRegionManager(this, STYLE_URL)
 
         mapView = findViewById(R.id.mapView)
@@ -101,11 +130,43 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                         source = it
                         style.addSource(it)
                     }
+                    // User-location dot: fused position (DR/GNSS), not raw GNSS.
+                    GeoJsonSource("dr-pos", FeatureCollection.fromFeatures(listOf())).also {
+                        posSource = it
+                        style.addSource(it)
+                    }
+                    // Theme-aware accent: resolves Material You dynamic color,
+                    // falls back to the static palette primary.
+                    val accent = try {
+                        String.format(
+                            "#%06X",
+                            0xFFFFFF and com.google.android.material.color.MaterialColors
+                                .getColor(mapView, com.google.android.material.R.attr.colorPrimary)
+                        )
+                    } catch (_: Exception) { "#6750A4" }
                     style.addLayer(
                         LineLayer("track-layer", "dr-track")
                             .withProperties(
-                                org.maplibre.android.style.layers.PropertyFactory.lineColor("#1A73E8"),
+                                org.maplibre.android.style.layers.PropertyFactory.lineColor(accent),
                                 org.maplibre.android.style.layers.PropertyFactory.lineWidth(5f),
+                            )
+                    )
+                    // Halo beneath the dot, then white core with accent ring.
+                    style.addLayer(
+                        org.maplibre.android.style.layers.CircleLayer("pos-halo", "dr-pos")
+                            .withProperties(
+                                org.maplibre.android.style.layers.PropertyFactory.circleRadius(18f),
+                                org.maplibre.android.style.layers.PropertyFactory.circleColor(accent),
+                                org.maplibre.android.style.layers.PropertyFactory.circleOpacity(0.25f),
+                            )
+                    )
+                    style.addLayer(
+                        org.maplibre.android.style.layers.CircleLayer("pos-dot", "dr-pos")
+                            .withProperties(
+                                org.maplibre.android.style.layers.PropertyFactory.circleRadius(7f),
+                                org.maplibre.android.style.layers.PropertyFactory.circleColor("#FFFFFF"),
+                                org.maplibre.android.style.layers.PropertyFactory.circleStrokeWidth(3f),
+                                org.maplibre.android.style.layers.PropertyFactory.circleStrokeColor(accent),
                             )
                     )
                     pendingCenter?.let {
@@ -114,7 +175,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                     // initial text now that map is ready
                     sheetDetail.visibility = android.view.View.VISIBLE
-                    sheetDetail.text = getString(R.string.detail_line, 0f, 0f, 0f)
+                    // detail_line has 7 specifiers (lean, bike, trip, model, sigma, still, meta)
+                    sheetDetail.text = getString(R.string.detail_line, 0f, 0f, 0f, 0f, 0f, "false", 0)
+                    driftChip.text = getString(R.string.drift_chip, 0f)
                 }
             })
             map.uiSettings.isCompassEnabled = true
@@ -147,6 +210,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             }
         }
 
+        // Recenter & follow: tap to snap to the fused position and keep following.
+        // Any user pan/zoom cancels follow (standard Maps behavior).
+        findViewById<FloatingActionButton>(R.id.btnRecenter).setOnClickListener {
+            followMode = true
+            centerOnPosition()
+        }
+        mapView.getMapAsync { m ->
+            m.addOnCameraMoveStartedListener { reason ->
+                if (reason == org.maplibre.android.maps.MapLibreMap.OnCameraMoveStartedListener.REASON_API_GESTURE) {
+                    followMode = false
+                }
+            }
+        }
+
         requestPermissions()
         startSensors()
         startLocation()
@@ -168,6 +245,8 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 lastV = pipeline.onFusionTick(dt, null, null)
                 val v = lastV
                 val mode = pipeline.mode
+                // Trip integration: exactly once per tick, only when we have a real fix area
+                if (lastGnssLat != null && v > 0.0) distTraveled += v * dt
                 // Dead-reckon position only when GNSS is actually gone.
                 if (mode is FusionMode.DeadReckoning) {
                     val course = pipeline.alignment.yawGnss
@@ -194,6 +273,20 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             // Asset identity for the health sheet (Tier 3) — cheap, once, off-main.
             modelHashShort = BuildInfo.assetHash12(this@MainActivity, "model.tflite")
             scalerHashShort = BuildInfo.assetHash12(this@MainActivity, "scaler.json")
+        }
+    }
+
+    /** Smoothly move the camera to the current fused position. */
+    private fun centerOnPosition() {
+        val target = LatLng(pipeline.lat, pipeline.lon)
+        if (mapReady) {
+            mapView.getMapAsync { m ->
+                m.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(target, 16.5), 500,
+                )
+            }
+        } else {
+            pendingCenter = target
         }
     }
 
@@ -252,7 +345,21 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
         val dt = if (lastSensorTs == 0L) 0.01 else (e.timestamp - lastSensorTs) / 1e9
         lastSensorTs = e.timestamp
-        pipeline.onImu(lastAcc, lastGyro, dt)
+        // P4 timestamp discipline: reject dt spikes >50ms (sensor drop/batch
+        // stall) instead of feeding the ring — a 200ms hole interpolated by
+        // the filter would silently skew every window after it.
+        if (dt <= 0.05) {
+            try {
+                pipeline.onImu(lastAcc, lastGyro, dt)
+            } catch (e: IllegalArgumentException) {
+                // P2: AVNetInference.push rejects NaN/Inf or wrong-size
+                // samples; drop the bad sample instead of killing a live ride.
+                android.util.Log.w("DrPipeline", "rejected IMU sample: ${e.message}")
+            } catch (e: IllegalStateException) {
+                // Model produced NaN/Inf — keep the app alive, skip this tick.
+                android.util.Log.e("DrPipeline", "model output invalid: ${e.message}")
+            }
+        }
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
@@ -277,6 +384,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             locationClient.lastLocation.addOnSuccessListener { loc ->
                 if (loc != null) {
+                    everHadFix = true
                     lastGnssLat = loc.latitude; lastGnssLon = loc.longitude
                     if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
                         pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
@@ -298,6 +406,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             locationClient.requestLocationUpdates(req, object : LocationCallback() {
                 override fun onLocationResult(result: LocationResult) {
                     val loc = result.lastLocation ?: return
+                    everHadFix = true
                     lastGnssLat = loc.latitude; lastGnssLon = loc.longitude
                     pipeline.seamless.onFix(System.nanoTime() / 1_000_000)
                     if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
@@ -313,6 +422,11 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                             pendingCenter = LatLng(loc.latitude, loc.longitude)
                         }
                     }
+                    // GPS ground truth: phone in hand / car at lights says speed=0.0 → gate AI speed.
+                    // Latched: stays gated until GPS reports real movement (hysteresis 0.5 m/s
+                    // so GPS jitter near the threshold can't chatter the gate).
+                    if (loc.speed < DrPipeline.GNSS_STILL_SPEED) pipeline.onGnssStill()
+                    else if (loc.speed > 0.5) pipeline.onGnssMoving()
                     loc.bearing.toDouble().let { pipeline.alignment.updateGnssHeading(Math.toRadians(it), loc.speed.toDouble()) }
                     updateUi(loc.latitude, loc.longitude)
                 }
@@ -327,24 +441,28 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val isValidFix = !(gnssLat == 0.0 && gnssLon == 0.0) && gnssLat.isFinite() && gnssLon.isFinite() && kotlin.math.abs(gnssLat) > 0.1
         val v = lastV
         val mode = pipeline.mode
-        if (isValidFix) distTraveled += v * 0.1
+        // Trip is integrated in the 10Hz ticker (updateUi is ALSO called from GNSS callbacks
+        // at ~1Hz — integrating here too double-counted ~10%).
         runOnUiThread {
             statusChip.text = getString(
-                when (mode) {
-                    is FusionMode.GnssAided -> R.string.mode_gnss
-                    is FusionMode.DeadReckoning -> R.string.mode_ins
+                when {
+                    mode is FusionMode.GnssAided -> R.string.mode_gnss
+                    everHadFix -> R.string.mode_ins
+                    else -> R.string.mode_wait
                 }
             )
             statusChip.setTextColor(
-                when (mode) {
-                    is FusionMode.GnssAided -> 0xFF1A73E8.toInt()
-                    is FusionMode.DeadReckoning -> 0xFFE8710A.toInt()
+                when {
+                    mode is FusionMode.GnssAided -> 0xFF0B57D0.toInt()
+                    everHadFix -> 0xFFB06000.toInt()
+                    else -> 0xFF6B6B6B.toInt()
                 }
             )
             val pos = pipeline.ekf.position()
             val rawSigma = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2])
             val sigma = if (rawSigma.isFinite()) rawSigma else 0.0  // EKF can be NaN before first GPS
-            sheetSummary.text = getString(R.string.summary_line, v.toFloat(), sigma.toFloat())
+            sheetSummary.text = getString(R.string.summary_line, v.toFloat())
+            driftChip.text = getString(R.string.drift_chip, sigma.toFloat())
             sheetDetail.text = getString(
                 R.string.detail_line,
                 Math.toDegrees(pipeline.lean.phi).toFloat(),
@@ -360,17 +478,22 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 modelHashShort,
                 scalerHashShort,
             )
-            if (isValidFix) {
-                // Drop initial 0,0 if it slipped in, and avoid duplicate last point
-                if (track.isNotEmpty() && track[0].longitude() == 0.0 && track[0].latitude() == 0.0) track.removeAt(0)
-                if (track.isEmpty() || track.last().longitude() != gnssLon || track.last().latitude() != gnssLat) {
-                    track.add(Point.fromLngLat(gnssLon, gnssLat))
-                    // keep last 500 points to avoid memory bloat
-                    if (track.size > 500) track.removeAt(0)
+                if (isValidFix) {
+                    // Drop initial 0,0 if it slipped in, and avoid duplicate last point
+                    if (track.isNotEmpty() && track[0].longitude() == 0.0 && track[0].latitude() == 0.0) track.removeAt(0)
+                    if (track.isEmpty() || track.last().longitude() != gnssLon || track.last().latitude() != gnssLat) {
+                        track.add(Point.fromLngLat(gnssLon, gnssLat))
+                        // keep last 500 points to avoid memory bloat
+                        if (track.size > 500) track.removeAt(0)
+                    }
+                    source?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
+                    // Follow mode: chase the dot every tick (cheap no-op when idle).
+                    if (followMode) centerOnPosition()
+                    // Dot follows the FUSED estimate every tick (even a repeated fix —
+                    // DR can move between GNSS updates).
+                    posSource?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(Point.fromLngLat(gnssLon, gnssLat)))))
                 }
-                source?.setGeoJson(FeatureCollection.fromFeatures(listOf(Feature.fromGeometry(LineString.fromLngLats(track)))))
             }
-        }
         logger.log(
             (System.currentTimeMillis() - tStart) / 1000.0,
             pipeline.lat, pipeline.lon, gnssLat, gnssLon,
