@@ -23,6 +23,21 @@ android {
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed release when a keystore is configured (env or local.properties);
+            // falls back to debug signing for local field-test builds so adb install -r
+            // upgrades in place. CI has no keystore secrets yet (see release.yml TODO).
+            val ksFile = System.getenv("ANDROID_STORE_FILE")
+                ?: rootProject.file("sih26168-release.jks").takeIf { it.exists() }?.absolutePath
+            if (ksFile != null) {
+                signingConfig = signingConfigs.create("release") {
+                    storeFile = file(ksFile)
+                    storePassword = System.getenv("ANDROID_STORE_PASSWORD") ?: "sih26168field2026"
+                    keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "sih26168"
+                    keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: "sih26168field2026"
+                }
+            } else {
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
     compileOptions {

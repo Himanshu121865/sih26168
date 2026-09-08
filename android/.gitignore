@@ -6,3 +6,4 @@ local.properties
 captureSS/
 local.properties
 .kotlin/
+*.jks
