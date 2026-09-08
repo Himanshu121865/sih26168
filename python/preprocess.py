@@ -25,10 +25,12 @@ from python.core.signal import (
     find_column as _core_find_column,
     resample_uniform as _core_resample_uniform,
     gravity_align_linear as _core_gravity_align,
+    estimate_gravity_lowpass as _core_estimate_gravity,
     is_window_stationary as _core_is_stationary,
 )
 from python.core.scaler import TrainOnlyScaler
 from python.core.runlog import init_runlog
+from python.core.spec import attach_spec
 from loguru import logger
 
 
@@ -73,6 +75,13 @@ def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray
     DEPRECATED wrapper — use python.core.signal.gravity_align_linear.
     """
     return _core_gravity_align(acc_raw, gravity)
+
+# Spec v2 (P1): gravity is COMPUTED with the live low-pass (identical to the
+# Kotlin gEst filter), not read from dataset columns. GRAVITY X/Y/Z become a
+# cross-check (max |Δ| logged); a stale/frozen column no longer poisons windows.
+def estimate_gravity_lowpass(acc_raw: np.ndarray, alpha: float = 0.02) -> np.ndarray:
+    """g += alpha·(acc − g), init [0,0,9.81] — one implementation (spec v2)."""
+    return _core_estimate_gravity(acc_raw, alpha=alpha)
 
 def make_windows(arr: np.ndarray, window=200, stride=10):
     """arr (T,6) -> (N, window, 6)"""
@@ -237,16 +246,44 @@ def main():
 
                 # build t_ns
                 t_ns = (t_ms_raw * 1e6).astype(np.int64)  # ms -> ns
-                # verify median interval ~100ms for 10Hz
-                median_dt_ms = np.median(np.diff(t_ms_raw))
-                # print(f"  median dt {median_dt_ms:.1f} ms")
+                # P4 timestamp discipline: audit dt BEFORE resampling.
+                # - median_dt + gap fraction are logged per file
+                # - >5% gaps  => reject file (holey interpolation poisons windows)
+                # - odd rate  => flagged (S-M 51ms / S4 80ms are known)
+                dts_ms = np.diff(t_ms_raw)
+                finite_dts = dts_ms[np.isfinite(dts_ms)]
+                if len(finite_dts) > 0:
+                    median_dt_ms = float(np.median(finite_dts))
+                    gap_thr_ms = max(3.0 * median_dt_ms, 150.0)  # 1 dropped 10Hz sample OR 150ms
+                    gap_frac = float(np.mean(finite_dts > gap_thr_ms))
+                else:
+                    median_dt_ms, gap_frac = float("nan"), 0.0
+                rate_expected_ms = 1000.0 / 10.0  # IO-VNBD S files are 10Hz
+                rate_flag = "odd-rate" if abs(median_dt_ms - rate_expected_ms) > 15.0 else ""
+                if gap_frac > 0.05:
+                    logger.error(
+                        f"[reject] {Path(f).parent.name}/{Path(f).name}: "
+                        f"gap_frac={gap_frac:.1%} >5% (median_dt={median_dt_ms:.1f}ms) — "
+                        f"file excluded from {args.out}"
+                    )
+                    continue
 
                 acc_raw = df[acc_cols].values.astype(np.float64)
-                grav = df[grav_cols].values.astype(np.float64)
+                grav_cols_present = None not in grav_cols and all(c in df.columns for c in grav_cols)
                 gyro = df[gyro_cols].values.astype(np.float64)
 
-                # gravity align: linear acc = acc - gravity (removes 9.81 before scaler)
-                linear_acc = gravity_align_linear(acc_raw, grav)  # (N,3)
+                # Spec v2 (P1): gravity via the live low-pass — the SAME filter
+                # the Android LeanDetector runs per 100Hz sample. Dataset GRAVITY
+                # columns are only a cross-check now (train/live parity, not truth).
+                grav_est = estimate_gravity_lowpass(acc_raw)  # (N,3)
+                if grav_cols_present:
+                    grav_col_vals = df[grav_cols].values.astype(np.float64)
+                    grav_diff = np.abs(grav_est - grav_col_vals).max()
+                else:
+                    grav_diff = float("nan")
+
+                # gravity align: linear acc = acc - grav_est (removes 9.81 before scaler)
+                linear_acc = gravity_align_linear(acc_raw, grav_est)  # (N,3)
 
                 # stack IMU: linear_acc (3) + gyro (3) = 6ch
                 imu_6 = np.concatenate([linear_acc, gyro], axis=1)  # (N,6)
@@ -291,7 +328,12 @@ def main():
                 if not hasattr(process_file_list, "all_stationary"):
                     process_file_list.all_stationary = []
                 process_file_list.all_stationary.append(stationary)
-                logger.info(f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms")
+                grav_str = "n/a" if np.isnan(grav_diff) else f"{grav_diff:.2f}"
+                logger.info(
+                    f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} "
+                    f"windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms "
+                    f"gap_frac={gap_frac:.1%} {rate_flag} grav_xdiff={grav_str}"
+                )
             except Exception as e:
                 logger.error(f"[err] {f}: {e}")
                 import traceback; traceback.print_exc()
@@ -329,6 +371,7 @@ def main():
             _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride, "partial": True})
             with open(args.scaler, "w") as _f:
                 json.dump(_sj, _f, indent=2)
+            attach_spec(args.scaler)  # P2: spec fingerprint even on partials
             mean = _sc.mean; std = _sc.std
             out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
             np.save(out / "train_windows.npy", ((X_train - mean)/std).astype(np.float32))
@@ -356,6 +399,8 @@ def main():
     _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride})
     with open(args.scaler, "w") as _f:
         json.dump(_sj, _f, indent=2)
+    # P2: stamp spec_version + spec_sha256 — export/Android refuse unversioned scalers.
+    attach_spec(args.scaler)
     mean = _scaler.mean; std = _scaler.std
     logger.info(f"[scaler] {args.scaler} mean {mean} std {std}")
 

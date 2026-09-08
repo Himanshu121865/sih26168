@@ -20,7 +20,12 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from python.core.signal import find_column, resample_uniform, gravity_align_linear
+from python.core.signal import (
+    find_column,
+    resample_uniform,
+    gravity_align_linear,
+    estimate_gravity_lowpass,
+)
 
 TIME_PAT = r"time since start"
 GPS_SPEED_PAT = r"gps speed"
@@ -52,7 +57,11 @@ def _resolve_columns(df):
 
 
 def resample_file_to_hz(df, hz):
-    """Resample one S-file df to uniform hz. Returns (imu_6 (T,6) linear+gyro, v_ms (T,), t_new_ns)."""
+    """Resample one S-file df to uniform hz. Returns (imu_6 (T,6) linear+gyro, v_ms (T,), t_new_ns).
+
+    Spec v2 parity with preprocess.py: gravity is COMPUTED via the live
+    low-pass (estimate_gravity_lowpass), dataset GRAVITY columns ignored.
+    """
     acc_cols, grav_cols, gyro_cols, time_col, gps_col = _resolve_columns(df)
     # monotonic time (sort if device reordered)
     t_ms_raw = df[time_col].values.astype(float)
@@ -63,9 +72,9 @@ def resample_file_to_hz(df, hz):
     t_ns = (t_ms_raw * 1e6).astype(np.int64)
 
     acc_raw = df[acc_cols].values.astype(np.float64)
-    grav = df[grav_cols].values.astype(np.float64)
     gyro = df[gyro_cols].values.astype(np.float64)
-    linear_acc = gravity_align_linear(acc_raw, grav)
+    grav_est = estimate_gravity_lowpass(acc_raw)  # spec v2 (P1)
+    linear_acc = gravity_align_linear(acc_raw, grav_est)
     imu_6 = np.concatenate([linear_acc, gyro], axis=1)
 
     t_new_ns, imu_new = resample_uniform(t_ns, imu_6, hz)

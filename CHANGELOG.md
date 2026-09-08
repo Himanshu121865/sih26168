@@ -7,6 +7,16 @@ bundle attached to the GitHub Release).
 ## [Unreleased]
 
 ### Added
+- Window-Path Hardening P1–P4 IMPLEMENTED (2026-09-08): unified live
+  low-pass gravity (`estimate_gravity_lowpass`, dataset GRAVITY columns now
+  cross-check only), versioned window spec + fingerprints
+  (`docs/WINDOW_SPEC.md`, `python/core/spec.py`, scaler.json stamps,
+  export refuses unversioned/mismatched pairs, `model_manifest.json`),
+  cross-language golden vectors (`tools/gen_golden_vectors.py` +
+  `tests/test_window_golden.py` + Kotlin `WindowGoldenTest`, parity ≤1e-6,
+  lean <10° tripwire), timestamp discipline (preprocess gap audit + >5%
+  reject, Android dt>50ms ring guard). Remaining: spec-v2 retrain (one
+  Colab run) then flip STRICT_SPEC / WindowSpecGuard.strict.
 - Window-path hardening plan P1–P4 recorded in AGENTS.md (gravity unification,
   versioned spec + fingerprints, golden vectors, timestamp discipline).
 - Team scaffolding: CONTRIBUTING.md, CODEOWNERS, CI (python + android),

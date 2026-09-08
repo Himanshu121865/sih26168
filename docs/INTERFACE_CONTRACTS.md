@@ -19,12 +19,19 @@ only with a reviewer from the other track (CODEOWNERS enforces this).
 
 ## 2. `scaler.json` — normalization stats
 
-- **Producer:** `TrainOnlyScaler` via `python/preprocess.py` (train-only means).
-- **Consumer:** `android/.../engine/Scaler.kt` (`mean[i]`, `std[i]`, i in 0..5).
-- **Contract:** keys `mean[6], std[6], hz, window, stride, train_files`;
-  channel order identical to §1. `hz/window/stride` must match the model's
-  training window or inference silently degrades.
-- **Change protocol:** ships alongside the model, same PR, same review.
+- **Producer:** `TrainOnlyScaler` via `python/preprocess.py` (train-only means),
+  spec-stamped by `python/core/spec.py::attach_spec`.
+- **Consumer:** `android/.../engine/Scaler.kt` (`mean[i]`, `std[i]`, i in 0..5),
+  guarded by `WindowSpecGuard.kt` (startup fingerprint check).
+- **Contract:** keys `mean[6], std[6], hz, window, stride, train_files,
+  spec_version, spec_sha256, gravity_alpha`; channel order identical to §1.
+  `hz/window/stride` must match the model's training window or inference
+  silently degrades. `spec_version`+`spec_sha256` must match
+  `docs/WINDOW_SPEC.md` — unversioned or stale scalers are REFUSED by
+  `export_tflite.py` (exit 2) and by `WindowSpecGuard` (crash, once strict).
+- **Change protocol:** ships alongside the model, same PR, same review. A
+  window-path change bumps the spec version (full retrain + re-export +
+  golden-vector regeneration in the same PR).
 
 ## 3. CSV log schema — field-test scoring
 

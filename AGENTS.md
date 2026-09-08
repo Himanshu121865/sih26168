@@ -399,31 +399,49 @@ Planned (see README §12):
 | Alignment after phone rotate | 12 | Re-calib on `gyro energy < thresh && speed>15kmph` for 2s; test rotate 90° mid-drive. |
 | No tunnel access | 11-12 | Mask GNSS programmatically — valid per PS. |
 
-## Next — Window-Path Hardening (planned 2026-09-06, work starts tomorrow)
+## Next — Window-Path Hardening (planned 2026-09-06; P2/P3/P4 + P1 code DONE 2026-09-08)
 
 The IMU window path (`raw CSV → resample → gravity-remove → normalize → (200,6)`)
 is the frozen core: every past silent breakage lived here, never in modeling ideas.
 Decisions locked: train with gEst-style gravity removal (full retrain accepted);
 fingerprinting goes full (hash + refuse, not log-only).
 
-- **P1 — Gravity unification (needs retrain):** `preprocess.py` + `iovnbd_dataset.py`
-  recompute gravity with the live low-pass (`g += 0.02·(acc−g)`, init `[0,0,9.81]`)
-  instead of reading gravity columns; columns stay as cross-check only.
-  New `core/signal.estimate_gravity_lowpass()` is the single implementation.
-  Fold into the Step-2 branch run — one Colab cycle, not two (see `docs/STEP2_TRAINING_PLAN.md`).
-- **P2 — Versioned spec + fingerprints:** new `docs/WINDOW_SPEC.md` (v1 = current,
-  v2 = unified); `scaler.json` gains `spec_version` + `sha256`; `export_tflite.py`
-  stamps TFLite metadata and refuses mismatched pairs; Android startup compares
-  asset fingerprint vs expected spec and refuses inference on mismatch (fail loud).
-  `AVNetInference.push` gains NaN/size guards.
-- **P3 — Cross-language golden vectors:** fixed raw snippet → expected normalized
-  window bytes, checked by `tests/test_window_golden.py` AND Kotlin `WindowGoldenTest`
-  on the same asset file; lean `mean|φ|<10°` rides along as the 38°-bug tripwire.
-- **P4 — Timestamp discipline:** preprocess logs per-file `median_dt` + gaps, rejects
-  files with >5% gaps (S-M 51ms / S4 80ms get flagged); Android `onImu` rejects
-  `dt` spikes >50ms instead of feeding the ring.
-- **Order:** P2 docs+plumbing (no retrain) → P1+P4 + Step-2 branch retrain (one Colab
-  run) → P3 vectors from the new pipeline → Kotlin guards + refuse-to-run (Studio gate).
+**Status 2026-09-08:** all four items implemented; only the P1 **retrain**
+(a Colab cycle, folded into the Step-2 branch run per
+`docs/STEP2_TRAINING_PLAN.md`) remains. Gates warn until that lands, then
+go strict (STRICT_SPEC=1 / WindowSpecGuard.strict).
+
+- **P1 — Gravity unification (code done, retrain pending):**
+  `python/core/signal.estimate_gravity_lowpass()` is the single
+  implementation (`g += 0.02·(acc−g)`, init `[0,0,9.81]`, BEFORE resample);
+  `preprocess.py` + `iovnbd_dataset.py` both use it. Dataset GRAVITY columns
+  are now cross-check only (`grav_xdiff` logged per file). Root `scaler.json`
+  honestly stamped `spec_version:1` (v1-era) — the v2 stamp comes with the
+  retrain.
+- **P2 — Versioned spec + fingerprints (DONE, warn-mode until retrain):**
+  `docs/WINDOW_SPEC.md` (v1 legacy / v2 unified); `python/core/spec.py`
+  stamps `spec_version`+`spec_sha256`+`gravity_alpha` into scaler.json at
+  preprocess time; `export_tflite.py` REFUSES unversioned/mismatched scalers
+  (exit 2) and writes `model_manifest.json` (model↔scaler↔spec hashes);
+  gradle `copyModelAssets` warns (STRICT_SPEC=1 → fails); Android
+  `WindowSpecGuard.kt` + `Scaler.kt` verify at startup (strict=false for
+  now — staged rollout). `AVNetInference.push` gained NaN/size guards
+  (throws; pipeline catches upstream).
+- **P3 — Cross-language golden vectors (DONE):**
+  `tools/gen_golden_vectors.py` → `android/app/src/main/assets/window_golden.json`
+  (291 samples, deterministic fixture); `tests/test_window_golden.py` AND
+  Kotlin `WindowGoldenTest` recompute the path from the SAME asset and
+  require parity ≤1e-6; lean `mean|φ|<10°` tripwire rides along (currently
+  1.29°) as the 38°-bug regression guard. `WindowSpecGuardTest` pins the
+  spec hash prefix in Kotlin.
+- **P4 — Timestamp discipline (DONE):** preprocess logs per-file
+  `median_dt`+`gap_frac`+`rate_flag`, rejects files with >5% gaps
+  (thr `max(3·median_dt,150ms)`); Android `onSensorChanged` rejects `dt`
+  spikes >50ms instead of feeding the ring.
+- **Order (original plan, tracked):** P2 docs+plumbing (no retrain) → ✅
+  P1+P4 code → P3 vectors → Kotlin guards. Remaining: **P1 retrain (one
+  Colab run = Step-2 branch)** → flip STRICT_SPEC/strict → regenerate
+  golden vectors from the v2 pipeline → Studio gate.
 
 ## References
 

@@ -15,6 +15,12 @@ import torch
 
 from python.models.avnet import AVNetLite
 from python.core.runlog import init_runlog
+from python.core.spec import (
+    SPEC_VERSION,
+    spec_sha256,
+    write_model_manifest,
+    verify_scaler,
+)
 from loguru import logger
 
 def export_onnx(model, path="model.onnx", window=200):
@@ -169,6 +175,22 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     logger.info(f"[model] {n_params:,} params, est FP32 {n_params*4/1e6:.2f} MB FP16 {n_params*2/1e6:.2f} MB")
 
+    # P2 export gate: verify the scaler carries a matching spec fingerprint.
+    # Unversioned/stale scaler => REFUSE (fail loud, not log-only).
+    scaler_src = Path("python/scaler.json")
+    if not scaler_src.exists():
+        logger.error(f"[gate] {scaler_src} missing — run preprocess.py first. Aborting.")
+        sys.exit(2)
+    try:
+        verify_scaler(scaler_src)
+        logger.info(
+            f"[gate] scaler spec OK (v{SPEC_VERSION}, "
+            f"sha256 {spec_sha256()[:12]})"
+        )
+    except ValueError as e:
+        logger.error(f"[gate] REFUSING export: {e}")
+        sys.exit(2)
+
     onnx_path = export_onnx(model, args.onnx)
     validate_onnx(model, onnx_path, n=args.validate)
 
@@ -190,12 +212,38 @@ def main():
         logger.info(f"[fallback] copied {onnx_path} to {args.out}.onnx_fallback")
 
     # save scaler alongside
-    scaler_src = Path("python/scaler.json")
     if scaler_src.exists():
         import shutil, json as j
         scaler_dst = Path(args.out).parent / "scaler.json"
         shutil.copy(scaler_src, scaler_dst)
         logger.info(f"[scaler] copied {scaler_src} -> {scaler_dst}")
+
+    # P2: stamp manifest binding model ↔ scaler ↔ spec. Consumers (Android
+    # startup guard, release CI) verify hashes before trusting the pair.
+    final_model = tflite_final if tflite_final is not None else (args.out if ok else args.onnx)
+    if Path(final_model).exists():
+        try:
+            man = write_model_manifest(
+                Path(final_model).parent / "model_manifest.json",
+                final_model,
+                scaler_src,
+                extra={
+                    "params": n_params,
+                    "quant": args.quant,
+                    "tflite_diff": (
+                        open("reports/tflite_diff.txt").read().strip().splitlines()[-1]
+                        if Path("reports/tflite_diff.txt").exists()
+                        else None
+                    ),
+                },
+            )
+            logger.info(
+                f"[manifest] model_manifest.json "
+                f"(model {man['model_sha256'][:12]}, scaler {man['scaler_sha256'][:12]})"
+            )
+        except ValueError as e:
+            logger.error(f"[manifest] REFUSING to stamp: {e}")
+            sys.exit(2)
 
 if __name__ == "__main__":
     main()

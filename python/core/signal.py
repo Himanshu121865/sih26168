@@ -67,12 +67,48 @@ def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray
     Args:
         acc_raw: Raw accelerometer readings, shape (N, 3).
         gravity: Low-pass gravity estimate, shape (N, 3)
-            (IO-VNBD provides GRAVITY X/Y/Z columns).
+            (from :func:`estimate_gravity_lowpass` or a dataset column
+            used as cross-check only).
 
     Returns:
         Linear acceleration ``acc_raw - gravity``, shape (N, 3).
     """
     return acc_raw - gravity
+
+
+def estimate_gravity_lowpass(
+    acc_raw: np.ndarray, alpha: float = 0.02, init: np.ndarray | None = None
+) -> np.ndarray:
+    """Single implementation of the live low-pass gravity estimate (spec v2, P1).
+
+    Mirrors LeanDetector.kt ``gEst += 0.02·(acc − gEst)`` exactly so train
+    and on-device preprocessing agree channel-for-channel. Runs on the raw
+    10 Hz signal BEFORE resampling (order matters: the Kotlin side applies
+    the same filter per 100 Hz sample).
+
+    Args:
+        acc_raw: Raw accelerometer readings incl. gravity, shape (N, 3).
+        alpha: Low-pass coefficient (0.02 ≈ 0.5 s settle at 100 Hz).
+        init: Optional gravity seed, shape (3,). Default ``[0, 0, 9.81]``.
+
+    Returns:
+        Gravity estimate per sample, shape (N, 3), float64.
+
+    Raises:
+        ValueError: If ``acc_raw`` is not (N, 3) or ``init`` is not (3,).
+    """
+    acc_raw = np.asarray(acc_raw, dtype=np.float64)
+    if acc_raw.ndim != 2 or acc_raw.shape[1] != 3:
+        raise ValueError(f"expected (N,3) accel, got shape {acc_raw.shape}")
+    g0 = np.array([0.0, 0.0, 9.81]) if init is None else np.asarray(init, dtype=np.float64)
+    if g0.shape != (3,):
+        raise ValueError(f"init must be shape (3,), got {g0.shape}")
+    g = np.empty_like(acc_raw)
+    cur = g0.copy()
+    for i in range(acc_raw.shape[0]):
+        cur = cur + alpha * (acc_raw[i] - cur)
+        g[i] = cur
+    return g
 
 
 def is_window_stationary(

@@ -21,5 +21,8 @@
   "train_files": [
     "S-M.csv",
     "S-S1.csv"
-  ]
+  ],
+  "spec_version": 1,
+  "spec_note": "v1-era scaler (dataset GRAVITY columns); awaiting spec-v2 retrain \u2014 see docs/WINDOW_SPEC.md",
+  "spec_sha256": "d1f1b348c6cac738cdbf9d7a2cc771d8643fb7f49d164fd0bd48094d5fffd06b"
 }
