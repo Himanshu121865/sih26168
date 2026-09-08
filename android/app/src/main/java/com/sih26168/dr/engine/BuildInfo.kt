@@ -12,7 +12,7 @@ import java.security.MessageDigest
  */
 object BuildInfo {
     /** Window-spec version this APK was built against (mirrors P2 `spec_version`). */
-    const val SPEC_VERSION = 1
+    const val SPEC_VERSION = WindowSpecGuard.EXPECTED_SPEC_VERSION
 
     /**
      * Short SHA-256 of a bundled asset for display/logging.

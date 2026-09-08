@@ -46,8 +46,19 @@ class AVNetInference(context: Context) {
         interpreter = Interpreter(model, Interpreter.Options().apply { numThreads = 2 })
     }
 
-    /** Push one normalized 6ch sample; call at 100Hz. Returns true when a new inference ran (10Hz). */
+    /** Push one normalized 6ch sample; call at 100Hz. Returns true when a new inference ran (10Hz).
+     *  @throws IllegalArgumentException on size mismatch or NaN/Inf input (fail loud, P2). */
     fun push(raw: FloatArray): Boolean {
+        require(raw.size == CHANNELS) {
+            "push expects $CHANNELS channels, got ${raw.size} — window path corrupted upstream"
+        }
+        for (v in raw) {
+            if (v.isNaN() || v.isInfinite()) {
+                throw IllegalArgumentException(
+                    "NaN/Inf in IMU sample (ch=${raw.joinToString()}) — refusing to feed ring"
+                )
+            }
+        }
         System.arraycopy(raw, 0, ring[ringHead], 0, CHANNELS)
         ringHead = (ringHead + 1) % WINDOW
         if (filled < WINDOW) filled++
@@ -79,6 +90,12 @@ class AVNetInference(context: Context) {
         interpreter.runForMultipleInputsOutputs(arrayOf(inputBuf), outputs)
         vPred = vOut[0][0]
         sigmaV = kotlin.math.exp(lsOut[0][0])
+        // Output guards: a NaN from the model poisons the whole filter downstream.
+        if (vPred.isNaN() || vPred.isInfinite() || sigmaV.isNaN() || sigmaV.isInfinite()) {
+            throw IllegalStateException(
+                "model produced NaN/Inf (vPred=$vPred sigmaV=$sigmaV) — refusing to emit"
+            )
+        }
     }
 
     fun close() = interpreter.close()
