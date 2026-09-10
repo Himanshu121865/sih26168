@@ -2,9 +2,9 @@ name: python
 
 on:
   push:
-    paths: ["python/**", "tests/**", "pyproject.toml", "sih26168_colab.ipynb"]
+    paths: ["python/**", "tests/**", "tools/**", "pyproject.toml", "sih26168_colab.ipynb"]
   pull_request:
-    paths: ["python/**", "tests/**", "pyproject.toml", "sih26168_colab.ipynb"]
+    paths: ["python/**", "tests/**", "tools/**", "pyproject.toml", "sih26168_colab.ipynb"]
 
 jobs:
   lint-test:
@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install numpy pandas loguru pytest pytest-cov
+      - run: pip install numpy pandas loguru matplotlib pytest pytest-cov torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install ruff
       - run: python -m compileall -q python tests
+      - run: ruff check python tests tools
       - run: PYTHONPATH=. python -m pytest tests/ -q

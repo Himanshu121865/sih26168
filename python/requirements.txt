@@ -1,10 +1,12 @@
-torch==2.13.0
-numpy==2.4.6
-scipy==1.17.1
-pandas==3.0.5
-onnx==1.22.0
-tensorboard==2.21.0
-loguru==0.7.3
-matplotlib==3.11.1
-scienceplots==2.2.2
-scikit-learn==1.9.0
+# Pinned runtime for Colab T4 / local CPU (matches python.yml CI + notebook).
+# Local quick gate (`make smoke`, `make types`) needs NONE of these.
+torch>=2.4.1
+numpy>=1.26
+pandas>=2.1
+loguru>=0.7
+matplotlib>=3.8
+scipy>=1.11
+onnx>=1.16
+onnxscript>=0.1      # torch>=2.13 ONNX exporter needs this
+tensorboard>=2.16
+scikit-learn>=1.3

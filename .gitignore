@@ -21,3 +21,6 @@ ref/
 .idea/
 # OS
 .DS_Store
+
+# Field collection data (large CSVs — never in git)
+collected_data/

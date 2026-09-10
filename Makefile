@@ -4,7 +4,7 @@
 
 PY := PYTHONPATH=. python
 
-.PHONY: smoke test audit train train-smoke eval eval-2d harness export apk release-check
+.PHONY: smoke lint types test audit train train-smoke eval eval-2d harness export apk release-check
 
 smoke: ## Local stdlib gate: compile + download skip-logic (runs anywhere)
 	python3 -m compileall -q python tests
@@ -14,7 +14,15 @@ smoke: ## Local stdlib gate: compile + download skip-logic (runs anywhere)
 	d = Path(tempfile.mkdtemp()); p = d/'s.zip'; p.write_bytes(b'x'*8); \
 	download('http://example.invalid/s.zip', p, 8); print('smoke OK')"
 
-test: ## Full pytest suite (Colab/CI: needs numpy pandas loguru)
+lint: ## ruff (E/F/I/UP/B) — zero tolerance
+	ruff check python tests tools
+
+types: ## strict mypy on the pure (torch-free) core
+	mypy python/core/signal.py python/core/scaler.py python/core/spec.py \
+	      python/core/types.py python/core/runlog.py python/config.py \
+	      python/eval/metrics.py python/utils/zupt.py python/download_iovnbd.py
+
+test: ## Full pytest suite (Colab/CI: needs numpy pandas loguru torch)
 	$(PY) -m pytest tests/ -q
 
 audit: ## Per-file val audit, Step 0 (Colab T4, ~8 min)
