@@ -143,5 +143,5 @@ if __name__ == "__main__":
     ate_rmse, _ = ate(est, gt)
     print(f"ATE {ate_rmse:.3f}")
     print(f"RTE 60s {rte(est, gt, np.arange(100) * 0.1):.3f}")
-    print(f"drift {drift_pct(np.linalg.norm(est[-1] - gt[-1]), total_distance(gt)):.2f}%")
+    print(f"drift {drift_pct(float(np.linalg.norm(est[-1] - gt[-1])), total_distance(gt)):.2f}%")
     print(f"coverage {coverage(np.random.randn(100, 1), np.ones((100, 1))):.2f} (expect ~0.68)")

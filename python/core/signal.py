@@ -73,7 +73,7 @@ def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray
     Returns:
         Linear acceleration ``acc_raw - gravity``, shape (N, 3).
     """
-    return acc_raw - gravity
+    return np.asarray(acc_raw - gravity)
 
 
 def estimate_gravity_lowpass(

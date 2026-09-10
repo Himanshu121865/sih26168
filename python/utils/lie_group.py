@@ -5,12 +5,16 @@ Kept float64 as in reference (paper uses float64 in filter, float32 in CNN).
 """
 import torch
 
+
 def skew(w: torch.Tensor) -> torch.Tensor:
-    """w (3,) -> [w]_x (3,3)"""
-    wx = torch.zeros(3,3, dtype=w.dtype, device=w.device)
-    wx[0,1] = -w[2]; wx[0,2] =  w[1]
-    wx[1,0] =  w[2]; wx[1,2] = -w[0]
-    wx[2,0] = -w[1]; wx[2,1] =  w[0]
+    """Map w (3,) to its antisymmetric matrix [w]_x (3,3)."""
+    wx = torch.zeros(3, 3, dtype=w.dtype, device=w.device)
+    wx[0, 1] = -w[2]
+    wx[0, 2] = w[1]
+    wx[1, 0] = w[2]
+    wx[1, 2] = -w[0]
+    wx[2, 0] = -w[1]
+    wx[2, 1] = w[0]
     return wx
 
 def so3exp(phi: torch.Tensor) -> torch.Tensor:

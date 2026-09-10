@@ -12,7 +12,8 @@ Usage:
 Output format: [ {"lat": [...], "lon": [...]}, [[node_a, node_b], ...] ]
 (node index arrays; ~5MB for a city, loads instantly on device)
 """
-import argparse, json
+import argparse
+import json
 from pathlib import Path
 
 # Requires `esythe`/`osmium` python bindings: pip install osmium
@@ -34,7 +35,7 @@ class WayHandler(osmium.SimpleHandler if osmium else object):
 
     def way(self, w):
         ids = [nd.ref for nd in w.nodes]
-        for a, b in zip(ids[:-1], ids[1:]):
+        for a, b in zip(ids[:-1], ids[1:], strict=False):
             if a in self.nodes and b in self.nodes:
                 for nid in (a, b):
                     if nid not in self.node_idx:

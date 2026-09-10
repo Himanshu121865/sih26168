@@ -75,7 +75,7 @@ class TrainOnlyScaler:
             RuntimeError: If the scaler is not fitted.
         """
         mean, std = self._require_fitted()
-        return (X - mean) / std
+        return np.asarray((X - mean) / std)
 
     def inverse(self, X_norm: np.ndarray) -> np.ndarray:
         """Invert :meth:`transform`.
@@ -90,7 +90,7 @@ class TrainOnlyScaler:
             RuntimeError: If the scaler is not fitted.
         """
         mean, std = self._require_fitted()
-        return X_norm * std + mean
+        return np.asarray(X_norm * std + mean)
 
     def save(self, path: str | Path) -> None:
         """Save fitted statistics as JSON.

@@ -60,7 +60,7 @@ def file_sha256(path: str | Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
-def attach_spec(scaler_path: str | Path, spec_version: int = SPEC_VERSION) -> dict:
+def attach_spec(scaler_path: str | Path, spec_version: int = SPEC_VERSION) -> dict[str, object]:
     """Stamp a scaler.json with ``spec_version`` + ``spec_sha256`` in place.
 
     Args:
@@ -74,7 +74,7 @@ def attach_spec(scaler_path: str | Path, spec_version: int = SPEC_VERSION) -> di
         FileNotFoundError: If scaler_path does not exist.
     """
     p = Path(scaler_path)
-    d = json.loads(p.read_text())
+    d: dict[str, object] = json.loads(p.read_text())
     d["spec_version"] = spec_version
     d["spec_sha256"] = spec_sha256()
     d["gravity_alpha"] = _GRAVITY_ALPHA
@@ -84,7 +84,7 @@ def attach_spec(scaler_path: str | Path, spec_version: int = SPEC_VERSION) -> di
 
 def verify_scaler(
     scaler_path: str | Path, expect_version: int = SPEC_VERSION
-) -> dict:
+) -> dict[str, object]:
     """Load + verify a scaler.json against the expected window spec.
 
     Args:
@@ -99,7 +99,7 @@ def verify_scaler(
         ValueError: If spec fields are missing, stale, or the hash mismatches.
     """
     p = Path(scaler_path)
-    d = json.loads(p.read_text())
+    d: dict[str, object] = json.loads(p.read_text())
     got_ver = d.get("spec_version")
     got_hash = d.get("spec_sha256")
     if got_ver is None or got_hash is None:
@@ -125,8 +125,8 @@ def write_model_manifest(
     out_path: str | Path,
     model_path: str | Path,
     scaler_path: str | Path,
-    extra: dict | None = None,
-) -> dict:
+    extra: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Write model_manifest.json binding model ↔ scaler ↔ spec.
 
     The export gate and the Android startup guard both read this file (or
@@ -143,7 +143,7 @@ def write_model_manifest(
         The manifest dict (also written to out_path).
     """
     scaler = verify_scaler(scaler_path)
-    manifest = {
+    manifest: dict[str, object] = {
         "spec_version": SPEC_VERSION,
         "spec_sha256": spec_sha256(),
         "model_sha256": file_sha256(model_path),
@@ -159,13 +159,13 @@ def write_model_manifest(
 
 def verify_model_manifest(
     manifest_path: str | Path, model_path: str | Path, scaler_path: str | Path
-) -> dict:
+) -> dict[str, object]:
     """Verify a manifest against the actual model + scaler files on disk.
 
     Raises:
         ValueError: On any mismatch (fail loud — the caller refuses to ship).
     """
-    m = json.loads(Path(manifest_path).read_text())
+    m: dict[str, object] = json.loads(Path(manifest_path).read_text())
     for key, path in (("model_sha256", model_path), ("scaler_sha256", scaler_path)):
         got = file_sha256(path)
         if m.get(key) != got:
@@ -173,5 +173,8 @@ def verify_model_manifest(
                 f"{manifest_path}: {key} mismatch — {path} changed after export. "
                 "Re-run export_tflite.py."
             )
-    verify_scaler(scaler_path, expect_version=m.get("spec_version", SPEC_VERSION))
+    expect = m.get("spec_version", SPEC_VERSION)
+    if not isinstance(expect, int):
+        raise ValueError(f"{manifest_path}: spec_version must be int, got {type(expect).__name__}")
+    verify_scaler(scaler_path, expect_version=expect)
     return m

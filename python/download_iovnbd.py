@@ -12,8 +12,8 @@ Usage:
 """
 import argparse
 import sys
-from pathlib import Path
 import urllib.request
+from pathlib import Path
 
 SYNC_URL = "https://media.githubusercontent.com/media/onyekpeu/IO-VNBD/master/Synchronised%20V%20abd%20S%20datasets.zip"
 UNSYNC_URL = "https://media.githubusercontent.com/media/onyekpeu/IO-VNBD/master/Unsynchronised%20V%20and%20S%20Dataset.zip"
