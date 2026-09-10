@@ -79,6 +79,9 @@ class InEKFEngine(useGravity: Boolean = true) {
         // F Jacobian (21x21, only non-zero blocks built into flat ops)
         val F = Array(DIM) { DoubleArray(DIM) }
         val skewG = LieGroup.skew(g)
+        // PERF: svR/spR don't depend on the loop index — hoisted out (was recomputed 3x each).
+        val svR = LieGroup.matMul(LieGroup.skew(v), R)
+        val spR = LieGroup.matMul(LieGroup.skew(p), R)
         for (i in 0..2) {
             for (j in 0..2) {
                 F[3 + i][0 + j] = skewG[i][j]
@@ -86,8 +89,6 @@ class InEKFEngine(useGravity: Boolean = true) {
                 F[0 + i][9 + j] = -R[i][j]
                 F[3 + i][12 + j] = R[i][j]
             }
-            val svR = LieGroup.matMul(LieGroup.skew(v), R)
-            val spR = LieGroup.matMul(LieGroup.skew(p), R)
             for (j in 0..2) {
                 F[3 + i][9 + j] = svR[i][j]
                 F[6 + i][9 + j] = spR[i][j]

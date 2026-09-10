@@ -46,6 +46,7 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
     val smoothedV: Double get() = velSmooth
 
     companion object {
+        // Defaults only — LIVE values live in [tuning] (dev panel edits them without rebuild).
         const val ZUPT_HOLD_MS = 800.0             // hold v=0 this long after a still-gate fires
         const val MOTION_CONFIRM_MS = 250.0        // sustained un-gated motion before trusting model
         const val V_DEADBAND = 0.15                // m/s — below this, don't move position (walking ~0.8+)
@@ -59,7 +60,12 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
         // Indoor GPS flaps INS<->GNSS every ~1.5s; a short timer hold leaked through every
         // flap (34m fake distance measured). Latch + explicit clear is flap-proof.
         const val GNSS_STILL_MAX_HOLD_MS = 30_000.0
+        /** Inference block cadence: 100Hz push / inferEvery=10 = 10Hz. */
+        const val INFERENCE_DT = 0.1
     }
+
+    /** Live-tunable gate params — dev panel writes these, engine reads every tick. */
+    val tuning = TuningParams()
     private var velSmooth = 0.0
     private var lastModelV = 0.0
     private var motionConfirmMs = 0.0
@@ -102,10 +108,14 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             norm,
         )
         if (avnet.push(norm)) {
-            // ~ every 0.1s. HARD stationary gate is variance-based only (0.5s window):
-            // table = tiny variance -> still=true -> v=0. Walking/pedestrian motion has
-            // real accel+gyro variance -> still=false -> motion flows through.
-            val still = zupt.update(acc, gyro, dt, null)
+            // ~ every 0.1s (inference rate). HARD stationary gate is variance-based
+            // only (0.5s window): table = tiny variance -> still=true -> v=0.
+            // Walking/pedestrian motion has real accel+gyro variance -> still=false
+            // -> motion flows through. BUGFIX: dt here is the LAST 100Hz sample's dt
+            // (~0.01s) but this block runs at 10Hz — feeding it made the detector's
+            // internal clock and persistence window 10x too slow (0.3s latch took 3s).
+            // The 0.5s variance window (50 samples @10Hz) is preserved by passing dt=0.1.
+            val still = zupt.update(acc, gyro, INFERENCE_DT, null)
 
             val rawV = max(avnet.vPred.toDouble(), 0.0)
             lastRawModelV = rawV
@@ -113,19 +123,19 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
 
             // Motion confirmation: model must report speed above deadband for a few
             // consecutive ticks before trusting it (kills table nudges & spikes).
-            if (still || rawV < V_DEADBAND) {
+            if (still || rawV < tuning.vDeadband) {
                 motionConfirmMs = 0.0
-                if (still) zuptHoldMsRem = ZUPT_HOLD_MS
-            } else if (motionConfirmMs < MOTION_CONFIRM_MS) {
-                motionConfirmMs += 100.0
+                if (still) zuptHoldMsRem = tuning.zuptHoldMs
+            } else if (motionConfirmMs < tuning.motionConfirmMs) {
+                motionConfirmMs += INFERENCE_DT * 1000.0
             }
             // GPS-still latch: blocked until a moving fix clears it. While latched, also
             // reset motion-confirm so un-gating needs a fresh sustained-motion window —
             // otherwise the first tick after un-gate resumes instantly (leak observed).
-            val gnssGateActive = gnssStillLatched && engineS * 1000.0 < gnssStillDeadlineMs
+            val gnssGateActive = tuning.gnssGateEnabled && gnssStillLatched && engineS * 1000.0 < gnssStillDeadlineMs
             if (gnssGateActive) motionConfirmMs = 0.0
             if (!gnssGateActive) gnssStillLatched = false
-            val trustModel = motionConfirmMs >= MOTION_CONFIRM_MS && zuptHoldMsRem <= 0.0 && !gnssGateActive
+            val trustModel = motionConfirmMs >= tuning.motionConfirmMs && zuptHoldMsRem <= 0.0 && !gnssGateActive
 
             val vSourced = if (trustModel) rawV else 0.0
 
@@ -136,9 +146,9 @@ class DrPipeline(context: Context, useGravity: Boolean = true) {
             // Low-pass to kill remaining transients.
             velSmooth += V_SMOOTH_ALPH * (lastModelV - velSmooth)
 
-            if (zuptHoldMsRem > 0.0) zuptHoldMsRem -= 100.0
+            if (zuptHoldMsRem > 0.0) zuptHoldMsRem -= INFERENCE_DT * 1000.0
 
-            val v = if (velSmooth > V_DEADBAND) velSmooth else 0.0
+            val v = if (velSmooth > tuning.vDeadband) velSmooth else 0.0
             val vLatRaw = lean.nhc(v, lean.pBike > 0.5).first
             val moving = v > 0.0
             val rFwd = if (!moving) 0.05 * 0.05 else max(avnet.sigmaV.toDouble(), 0.3).let { it * it }

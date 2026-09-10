@@ -1,9 +1,12 @@
 package com.sih26168.dr.io
 
 import android.content.Context
-import android.os.Environment
+import androidx.documentfile.provider.DocumentFile
 import com.sih26168.dr.engine.BuildInfo
+import java.io.BufferedWriter
 import java.io.File
+import java.io.FileWriter
+import java.io.OutputStreamWriter
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -11,13 +14,13 @@ import java.util.Locale
 /**
  * CSV logger: timestamp, p_pred, p_gnss, v_ai, phi, p_bike, mode — AGENTS.md 12.4.
  *
- * Files land in the app's Documents dir as `dr_log_<ts>.csv`. Logging is
- * off until [start] is called; every method is a no-op otherwise.
+ * Files land in the [StoragePrefs] location (default app Documents dir or a
+ * user-picked folder). Logging is off until [start] is called; every method
+ * is a no-op otherwise.
  */
-class CsvLogger(context: Context) {
-    private val dir: File = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS)
-        ?: context.filesDir
+class CsvLogger(private val storage: StoragePrefs) {
     private var file: File? = null
+    private var writer: BufferedWriter? = null
     var enabled = false
 
     /**
@@ -32,19 +35,30 @@ class CsvLogger(context: Context) {
      * @param scalerHash short asset hash of scaler.json, or "?" if unknown.
      */
     fun start(
+        context: Context,
         specVersion: Int = BuildInfo.SPEC_VERSION,
         modelHash: String = "?",
         scalerHash: String = "?",
     ) {
+        stop()
         val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        file = File(dir, "dr_log_$ts.csv").apply {
-            writeText("timestamp_s,x_pred,y_pred,p_gnss_lat,p_gnss_lon,v_ai,sigma_v,phi_rad,p_bike,mode\n")
-            appendText("# run spec=v$specVersion model=$modelHash scaler=$scalerHash\n")
+        val target = storage.sessionFile(context, "dr_log_$ts.csv")
+        writer = BufferedWriter(OutputStreamWriter(target.openOutput(context), Charsets.UTF_8)).apply {
+            write("timestamp_s,x_pred,y_pred,p_gnss_lat,p_gnss_lon,v_ai,sigma_v,phi_rad,p_bike,mode\n")
+            write("# run spec=v$specVersion model=$modelHash scaler=$scalerHash\n")
+            flush()
         }
+        // Plain-file path kept for the synchronized append fast-path below.
+        file = target.plain
         enabled = true
     }
 
-    fun stop() { enabled = false; file = null }
+    fun stop() {
+        enabled = false
+        try { writer?.flush(); writer?.close() } catch (_: Exception) {}
+        writer = null
+        file = null
+    }
 
     fun log(
         tS: Double, xPred: Double, yPred: Double,
@@ -52,9 +66,10 @@ class CsvLogger(context: Context) {
         vAi: Double, sigmaV: Double, phi: Double, pBike: Double, mode: String,
     ) {
         if (!enabled) return
-        val f = file ?: return
-        f.appendText(
-            "$tS,$xPred,$yPred,${gLat ?: ""},${gLon ?: ""},$vAi,$sigmaV,$phi,$pBike,$mode\n"
-        )
+        // Called from BOTH the 10Hz engine ticker and the GNSS callback (~1Hz,
+        // different threads) — synchronize on the writer so CSV lines never interleave.
+        val line = "$tS,$xPred,$yPred,${gLat ?: ""},${gLon ?: ""},$vAi,$sigmaV,$phi,$pBike,$mode\n"
+        val w = writer ?: return
+        synchronized(w) { w.write(line) }
     }
 }

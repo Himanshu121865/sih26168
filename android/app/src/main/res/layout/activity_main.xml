@@ -66,16 +66,8 @@
         android:elevation="12dp"
         android:orientation="vertical"
         android:paddingHorizontal="24dp"
-        android:paddingTop="18dp"
+        android:paddingTop="16dp"
         android:paddingBottom="28dp">
-
-        <!-- Drag-handle affordance -->
-        <View
-            android:layout_width="36dp"
-            android:layout_height="4dp"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginBottom="14dp"
-            android:background="#55FFFFFF" />
 
         <!-- Hero: speed big + drift chip beside it -->
         <LinearLayout

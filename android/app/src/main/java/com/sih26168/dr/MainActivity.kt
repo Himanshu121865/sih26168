@@ -7,6 +7,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Bundle
+import android.os.SystemClock
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -22,7 +23,11 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 import com.sih26168.dr.engine.DrPipeline
 import com.sih26168.dr.engine.BuildInfo
 import com.sih26168.dr.engine.SeamlessHandler.FusionMode
+import com.sih26168.dr.dev.DevPanel
 import com.sih26168.dr.io.CsvLogger
+import com.sih26168.dr.io.RawImuLogger
+import com.sih26168.dr.io.StoragePrefs
+import com.sih26168.dr.io.TagManager
 import com.sih26168.dr.map.OfflineRegionManager
 import com.sih26168.dr.map.RoadGraph
 import kotlinx.coroutines.Dispatchers
@@ -48,6 +53,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         // Detailed OSM vector style, no key, works offline after download.
         const val STYLE_URL = "https://tiles.openfreemap.org/styles/liberty"
         const val PERMISSIONS = 1001
+        const val REQ_PICK_FOLDER = 2002
     }
 
     private lateinit var mapView: MapView
@@ -55,9 +61,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var sheetSummary: TextView
     private lateinit var sheetDetail: TextView
     private lateinit var driftChip: TextView
-    private lateinit var pipeline: DrPipeline
+    lateinit var pipeline: DrPipeline  // internal (dev panel reads tuning/stats)
     private lateinit var logger: CsvLogger
+    private lateinit var rawLogger: RawImuLogger
+    private lateinit var tagManager: TagManager
+    lateinit var storage: StoragePrefs
     private lateinit var offline: OfflineRegionManager
+    private var devPanel: DevPanel? = null
+    /** Last hard-brake / pothole auto-tag nanos (dedupe window). */
+    private var lastAutoTagNanos = 0L
 
     private var source: GeoJsonSource? = null
     private var posSource: GeoJsonSource? = null
@@ -74,13 +86,33 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     private var pendingCenter: LatLng? = null
     private var loadingOverlay: android.view.View? = null
     private var firstFixDone = false
+    /** Loading overlay dismissed (timeout/tap) — independent of fix tracking so the
+     *  first REAL fix still zooms the camera even after the 3s overlay timeout. */
+    private var loadingDismissed = false
     /** True once ANY fix (cached or fresh) arrived — before that the chip must not claim INS. */
     private var everHadFix = false
+    /** Latest GNSS ground speed (m/s) — raw IMU log labels. */
+    @Volatile private var lastGnssSpeed: Float? = null
     /** Short asset hashes for the health sheet; computed once on an IO thread. */
     @Volatile private var modelHashShort: String = "…"
     @Volatile private var scalerHashShort: String = "…"
 
     private val locationClient by lazy { LocationServices.getFusedLocationProviderClient(this) }
+    private var sessionStartRealMs = 0L
+
+    // ---- Dev panel: 3-tap trigger on the status chip ----
+    private var chipTapCount = 0
+    private var chipFirstTapMs = 0L
+    private val chipTapListener = android.view.View.OnClickListener {
+        val now = SystemClock.elapsedRealtime()
+        android.util.Log.d("DevPanel", "chip tap #$chipTapCount")
+        if (now - chipFirstTapMs > 1500) { chipTapCount = 0; chipFirstTapMs = now }
+        if (++chipTapCount >= 3) {
+            chipTapCount = 0
+            android.util.Log.d("DevPanel", "opening panel")
+            (devPanel ?: DevPanel(this).also { devPanel = it }).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,7 +130,9 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         val radius = 28f * resources.displayMetrics.density
         val gd = android.graphics.drawable.GradientDrawable().apply {
             setColor(dynPrimary)
-            cornerRadii = floatArrayOf(radius, radius, 0f, 0f, 0f, 0f, radius, radius)
+            // cornerRadii order: TL, TR, BR, BL — round BOTH TOP corners only.
+            // (was [r,r,0,0,0,0,r,r] = TL+BL — one square top corner, rounded bottom.)
+            cornerRadii = floatArrayOf(radius, radius, radius, radius, 0f, 0f, 0f, 0f)
         }
         sheet.background = gd
 
@@ -108,15 +142,24 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         driftChip = findViewById(R.id.driftChip)
         loadingOverlay = findViewById(R.id.loadingOverlay)
         pipeline = DrPipeline(this, useGravity = true)  // raw Android IMU keeps gravity
-        logger = CsvLogger(this)
-        // Health-sheet identity: log what's ACTUALLY in assets, not what the
-        // APK was compiled against (they can differ during staged rollouts).
+        storage = StoragePrefs(this)
+        logger = CsvLogger(storage)
+        // Step 7 data collection: full-rate 100Hz raw IMU with event-time stamps.
+        rawLogger = RawImuLogger(this, storage)
+        tagManager = TagManager(storage)
+        rawLogger.start()
+        tagManager.start(this)
         logger.start(
+            this,
             specVersion = pipeline.scaler.specVersion,
             modelHash = BuildInfo.assetHash12(this, "model.tflite"),
             scalerHash = BuildInfo.assetHash12(this, "scaler.json"),
         )
+
         offline = OfflineRegionManager(this, STYLE_URL)
+
+        // Dev panel: 3 quick taps on the status chip (hidden affordance).
+        statusChip.setOnClickListener(chipTapListener)
 
         mapView = findViewById(R.id.mapView)
         mapView.onCreate(savedInstanceState)
@@ -264,6 +307,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                 val fixLon = lastGnssLon
                 val uiLat = if (mode is FusionMode.GnssAided && fixLat != null) fixLat else pipeline.lat
                 val uiLon = if (mode is FusionMode.GnssAided && fixLon != null) fixLon else pipeline.lon
+                runOnUiThread { devPanel?.refreshStats() }
                 updateUi(uiLat, uiLon)
             }
         }
@@ -276,9 +320,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    /** Smoothly move the camera to the current fused position. */
+    /** Smoothly move the camera to the current fused position.
+     *  BUGFIX: in GNSS-aided mode the dot shows the fresh GNSS fix while
+     *  pipeline.lat/lon only changes during DR — target the same position the dot shows. */
     private fun centerOnPosition() {
-        val target = LatLng(pipeline.lat, pipeline.lon)
+        val fixLat = lastGnssLat
+        val fixLon = lastGnssLon
+        val gnssAided = pipeline.mode is FusionMode.GnssAided
+        val target = if (gnssAided && fixLat != null && fixLon != null) LatLng(fixLat, fixLon)
+        else LatLng(pipeline.lat, pipeline.lon)
         if (mapReady) {
             mapView.getMapAsync { m ->
                 m.animateCamera(
@@ -325,13 +375,19 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
 
     private fun startSensors() {
         val sm = getSystemService(SENSOR_SERVICE) as SensorManager
-        val rateUs = (1_000_000_000 / 100)  // 100Hz
+        // UNITS BUG (found via dumpsys sensorservice): 1e9/100 = 10_000_000 was passed as
+        // MICROseconds = one sample per 10 SECONDS. registerListener takes µs: 100Hz = 10_000µs.
+        // The HW only ran fast because other apps (GMS) requested higher rates — delivery
+        // rate was never guaranteed. Verified: our connection showed samplingPeriod=1000000us.
+        val rateUs = 10_000  // 100Hz in microseconds
         sm.registerListener(this, sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER), rateUs)
         sm.registerListener(this, sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE), rateUs)
     }
 
     private val lastAcc = DoubleArray(3)
     private val lastGyro = DoubleArray(3)
+    /** Timestamp of the last GYRO event actually fed to the pipeline. */
+    private var lastGyroFedTs = 0L
 
     override fun onSensorChanged(e: SensorEvent) {
         when (e.sensor.type) {
@@ -343,8 +399,35 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
             }
             else -> return
         }
-        val dt = if (lastSensorTs == 0L) 0.01 else (e.timestamp - lastSensorTs) / 1e9
-        lastSensorTs = e.timestamp
+        // BUGFIX: acc and gyro each fire at 100Hz interleaved (~5ms apart) — feeding
+        // the pipeline on BOTH events ran onImu at 200Hz, halving the model's effective
+        // 2s window to 1s and doubling inference rate vs training. Drive the pipeline
+        // from GYRO events only (100Hz), pairing the latest accel — standard IMU practice.
+        if (e.sensor.type != Sensor.TYPE_GYROSCOPE) return
+        val dt = if (lastGyroFedTs == 0L) 0.01 else (e.timestamp - lastGyroFedTs) / 1e9
+        // Step 7: raw collection at sensor-EVENT time (monotonic nanos), not write time.
+        val gLat = lastGnssLat; val gLon = lastGnssLon; val gSpd = lastGnssSpeed
+        try {
+            rawLogger.log(e.timestamp, lastAcc, lastGyro, gLat, gLon, gSpd)
+        } catch (_: Exception) { /* never let logging kill the engine loop */ }
+        lastGyroFedTs = e.timestamp
+        // Auto-tag detection (dev panel tunable thresholds, deduped to 1 tag / 2s).
+        if (pipeline.tuning.autoTagEnabled && e.timestamp - lastAutoTagNanos > 2_000_000_000L) {
+            val accNorm = kotlin.math.sqrt(
+                lastAcc[0] * lastAcc[0] + lastAcc[1] * lastAcc[1] + lastAcc[2] * lastAcc[2]
+            )
+            val thr = pipeline.tuning
+            when {
+                accNorm < -0.0 || accNorm > 9.81 + thr.potholeSpikeThresh -> {
+                    lastAutoTagNanos = e.timestamp
+                    tagManager.auto("pothole", e.timestamp - 500_000_000L, e.timestamp, accNorm)
+                }
+                accNorm < 9.81 - thr.hardBrakeThresh -> {
+                    lastAutoTagNanos = e.timestamp
+                    tagManager.auto("hard_brake", e.timestamp - 500_000_000L, e.timestamp, accNorm)
+                }
+            }
+        }
         // P4 timestamp discipline: reject dt spikes >50ms (sensor drop/batch
         // stall) instead of feeding the ring — a 200ms hole interpolated by
         // the filter would silently skew every window after it.
@@ -365,7 +448,7 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
     private fun tryHideLoading() {
-        if (firstFixDone && mapReady) {
+        if ((firstFixDone || loadingDismissed) && mapReady) {
             loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
                 loadingOverlay?.visibility = android.view.View.GONE
             }?.start()
@@ -373,10 +456,14 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun forceHideLoading() {
+        // BUGFIX: this used to set firstFixDone=true, which permanently disabled
+        // the zoom-to-first-fix in the location callback ("app never zooms to me"
+        // when GPS arrives after the 3s overlay timeout). Track overlay dismissal
+        // separately from fix state.
+        loadingDismissed = true
         loadingOverlay?.animate()?.alpha(0f)?.setDuration(300)?.withEndAction {
             loadingOverlay?.visibility = android.view.View.GONE
         }?.start()
-        firstFixDone = true
     }
 
     private fun startLocation() {
@@ -408,10 +495,15 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
                     val loc = result.lastLocation ?: return
                     everHadFix = true
                     lastGnssLat = loc.latitude; lastGnssLon = loc.longitude
+                    lastGnssSpeed = loc.speed
+                    lastFixCount++
                     pipeline.seamless.onFix(System.nanoTime() / 1_000_000)
-                    if (pipeline.lat == 0.0 && pipeline.lon == 0.0) {
-                        pipeline.lat = loc.latitude; pipeline.lon = loc.longitude
-                    }
+                    // BUGFIX: pipeline lat/lon must track the LATEST fix, not just the
+                    // first one. DR integrates from pipeline.lat/lon when GNSS drops —
+                    // starting from a minutes-old first fix made every outage begin
+                    // with a huge stale-position jump.
+                    pipeline.lat = loc.latitude
+                    pipeline.lon = loc.longitude
                     // Always recenter on first few fixes until loading is gone
                     if (!firstFixDone) {
                         firstFixDone = true
@@ -527,5 +619,97 @@ class MainActivity : AppCompatActivity(), SensorEventListener {
     override fun onStop() { super.onStop(); mapView.onStop() }
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); mapView.onSaveInstanceState(outState) }
     override fun onLowMemory() { super.onLowMemory(); mapView.onLowMemory() }
-    override fun onDestroy() { super.onDestroy(); mapView.onDestroy(); pipeline.avnet.close() }
+    // ---- Dev panel API ----
+
+    /** Restart imu_log + tags sidecars as a fresh named session. */
+    fun startCollectionSession() {
+        rawLogger.start()
+        tagManager.start(this)
+        sessionStartRealMs = SystemClock.elapsedRealtime()
+        Toast.makeText(this, "session started → ${storage.displayPath(this)}", Toast.LENGTH_LONG).show()
+    }
+
+    /** Flush + close sidecars; data stays on disk for adb pull. */
+    fun stopCollectionSession() {
+        rawLogger.stop()
+        tagManager.stop(this)
+        Toast.makeText(this, "session stopped — ${rawLogger.rowCount} rows", Toast.LENGTH_LONG).show()
+    }
+
+    /** Manual tag at current sensor time with ±3s window. */
+    fun tagNow(name: String) {
+        tagManager.tag(name, lastGyroFedTs)
+    }
+
+    /** Multi-line stats blob for the dev panel (also clipboard-able). */
+    fun collectDevStats(): String {
+        val rawHz = if (rawLogger.rowCount > 1 && sessionStartRealMs > 0) {
+            val secs = (SystemClock.elapsedRealtime() - sessionStartRealMs) / 1000.0
+            if (secs > 1) "%.1f".format(rawLogger.rowCount / secs) else "…"
+        } else "…"
+        val files = storage.listSessionFiles(this).take(6)
+            .joinToString("\n") { (name, size, _) -> "  $name ${size / 1024}KB" }
+            .ifEmpty { "  (none yet)" }
+        return """
+            |storage: ${storage.displayPath(this)}${if (storage.isCustom) " (custom)" else " (default)"}
+            |mode: ${pipeline.mode.displayName}  v: ${"%.2f".format(lastV)} m/s  σv: ${"%.2f".format(pipeline.avnet.sigmaV)}
+            |raw rows: ${rawLogger.rowCount} (~$rawHz Hz)  trip: ${"%.0f".format(distTraveled)} m
+            |still: ${pipeline.lastStill}  confirm: ${pipeline.motionConfirmMsPublic}ms  latch: ${pipeline.tuning.gnssGateEnabled}
+            |lean: ${"%.1f".format(Math.toDegrees(pipeline.lean.phi))}°  gps: ${lastGnssLat != null} ($lastFixCount)
+            |recent files:
+            $files
+        """.trimMargin()
+    }
+
+    private var lastFixCount = 0
+
+    /** SAF folder picker result — persist + restart session in the new location. */
+    fun onFolderPicked(uri: android.net.Uri) {
+        storage.setTreeUri(this, uri)
+        // Restart loggers so the new files land in the picked folder immediately.
+        rawLogger.stop(); tagManager.stop(this)
+        rawLogger.start()
+        tagManager.start(this)
+        sessionStartRealMs = SystemClock.elapsedRealtime()
+        Toast.makeText(this, "logging → ${storage.displayPath(this)}", Toast.LENGTH_LONG).show()
+    }
+
+    /** Revert to default app folder. */
+    fun resetFolder() {
+        storage.clearTreeUri()
+        rawLogger.stop(); tagManager.stop(this)
+        rawLogger.start()
+        tagManager.start(this)
+        Toast.makeText(this, "logging → default app folder", Toast.LENGTH_SHORT).show()
+    }
+
+    fun pickFolder() {
+        val intent = android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT_TREE)
+        startActivityForResult(intent, REQ_PICK_FOLDER)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_PICK_FOLDER && resultCode == RESULT_OK) {
+            data?.data?.let { onFolderPicked(it) }
+        }
+    }
+
+    private fun rawLoggerDir(): java.io.File? {
+        val f = java.io.File(getExternalFilesDir(android.os.Environment.DIRECTORY_DOCUMENTS), ".")
+        return if (f.exists()) f else null
+    }
+
+    fun copyStatsToClipboard() {
+        val cb = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        cb.setPrimaryClip(android.content.ClipData.newPlainText("dr_stats", collectDevStats()))
+        Toast.makeText(this, "stats copied", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        rawLogger.stop()
+        tagManager.stop(this)
+        mapView.onDestroy(); pipeline.avnet.close()
+    }
 }
