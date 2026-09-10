@@ -1,451 +1,219 @@
 #!/usr/bin/env python3
-"""
-preprocess.py — Step 2.2-2.5 (P0 #1 FIXED 2026-08-30)
-Resample 10Hz→100Hz, gravity-align, per-axis normalize, sliding window (200, stride 10).
+"""Preprocess IO-VNBD S-files into normalized window npys + scaler.json.
 
-Fixes from competitor audit (docs/IMPROVEMENTS_FROM_COMPETITORS.md P0 #1):
-- find_column regex (sivaraman/prepare_training_data.py:205) for (m/s²) vs (m/s^2)
-- resample_uniform shared (harsh/pipeline.py:30-68) with period_ns=round(1e9/rate), np.interp left=np.nan, finite_mask
-- gravity_align via ACC - GRAVITY (IO-VNBD provides gravity), not no-op
-- split_by_trajectory (harsh/loaders.py:287) not window shuffle leak
-- encoding cp1252 + strip, dt validation
+Pipeline per file (single implementation in python/datasets/iovnbd.py):
+``load → resolve → dt-audit → sort → gravity(spec v2) → resample 10→100Hz →
+window (200, stride 10) → ZUPT labels``; then train-only scaler, chunked
+memmap save (no OOM on the full 822k-window set), spec fingerprint stamp.
 
 Usage:
-  python python/preprocess.py --subset 1h          # quick 1h subset for smoke test (<5 min)
-  python python/preprocess.py --window 200 --stride 10 --hz 100 --train-ratio 0.8
+    python python/preprocess.py --subset 1h          # smoke (<5 min)
+    python python/preprocess.py --window 200 --stride 10 --hz 100
+    python python/preprocess.py --split stratified   # ADR-010 branch A
 """
-import argparse, json, glob
-from pathlib import Path
-import numpy as np
-import pandas as pd
 
-# Single source of truth — core/signal.py (harsh/pipeline.py:30-68).
-# Local copies kept as deprecated wrappers for backward compat.
-from python.core.signal import (
-    find_column as _core_find_column,
-    resample_uniform as _core_resample_uniform,
-    gravity_align_linear as _core_gravity_align,
-    estimate_gravity_lowpass as _core_estimate_gravity,
-    is_window_stationary as _core_is_stationary,
-)
-from python.core.scaler import TrainOnlyScaler
-from python.core.runlog import init_runlog
-from python.core.spec import attach_spec
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import signal
+import sys
+from pathlib import Path
+
+import numpy as np
 from loguru import logger
 
+from python.config import (
+    HZ,
+    IOVNBD_BASE,
+    PROCESSED_DIR,
+    SCALER_PATH,
+    STRIDE,
+    TRAIN_RATIO,
+    WINDOW,
+    processed_paths,
+)
+from python.core.runlog import init_runlog
+from python.core.scaler import TrainOnlyScaler
+from python.core.spec import attach_spec
+from python.datasets.iovnbd import load_phone_csv, process_file
+from python.datasets.split import split_files
 
-# robust column finder (sivaraman/prepare_training_data.py:205)
-def find_column(df, pattern: str):
-    return _core_find_column(df, pattern)
-
-def find_columns_xyz(df, base_pattern):
-    # e.g., base "accelerometer" -> X,Y,Z cols
-    cols = {}
-    for axis in ["x","y","z"]:
-        pat = rf"{base_pattern}.*{axis}"
-        col = find_column(df, pat)
-        if col is None:
-            # fallback: try base without axis then positional
-            pass
-        cols[axis] = col
-    return cols
-
-# shared resample_uniform (harsh/pipeline.py:30-68)
-# DEPRECATED wrapper — use python.core.signal.resample_uniform directly.
-def resample_uniform(t_ns: np.ndarray, values: np.ndarray, rate_hz: float):
-    """
-    t_ns (N,) int64 ns, values (N,K) or (N,), rate_hz
-    Returns t_new_ns (M,), values_new (M,K)
-    Uses period_ns=round(1e9/rate), linear np.interp per channel, left/right=np.nan
-    Error if <2 samples.
-    """
-    return _core_resample_uniform(t_ns, values, rate_hz)
-
-def load_phone_csv(path: str) -> pd.DataFrame:
-    # cp1252 handles ² byte 0xb2 better than latin1, plus strip
-    df = pd.read_csv(path, encoding="cp1252")
-    df.columns = [c.strip() for c in df.columns]
-    return df
-
-def gravity_align_linear(acc_raw: np.ndarray, gravity: np.ndarray) -> np.ndarray:
-    """
-    IO-VNBD provides GRAVITY X/Y/Z (already low-pass). Linear acc = ACC - GRAVITY.
-    This removes gravity before scaling (harsh pipeline.py:105-108 R_wb@a - [0,0,9.80665]).
-    acc_raw (N,3), gravity (N,3) -> linear (N,3)
-    DEPRECATED wrapper — use python.core.signal.gravity_align_linear.
-    """
-    return _core_gravity_align(acc_raw, gravity)
-
-# Spec v2 (P1): gravity is COMPUTED with the live low-pass (identical to the
-# Kotlin gEst filter), not read from dataset columns. GRAVITY X/Y/Z become a
-# cross-check (max |Δ| logged); a stale/frozen column no longer poisons windows.
-def estimate_gravity_lowpass(acc_raw: np.ndarray, alpha: float = 0.02) -> np.ndarray:
-    """g += alpha·(acc − g), init [0,0,9.81] — one implementation (spec v2)."""
-    return _core_estimate_gravity(acc_raw, alpha=alpha)
-
-def make_windows(arr: np.ndarray, window=200, stride=10):
-    """arr (T,6) -> (N, window, 6)"""
-    T = arr.shape[0]
-    if T < window:
-        return np.empty((0, window, 6))
-    N = (T - window)//stride + 1
-    windows = np.stack([arr[i*stride:i*stride+window] for i in range(N)], axis=0)
-    return windows
-
-def compute_labels(df_100: pd.DataFrame, windows_idx, stride=10, window=200, gps_speed_col=None):
-    v_kmh = df_100[gps_speed_col].values if gps_speed_col and gps_speed_col in df_100.columns else np.zeros(len(df_100))
-    v_ms = v_kmh / 3.6
-    v_labels = np.array([v_ms[i*stride + window -1] for i in windows_idx])
-    att_labels = np.zeros((len(v_labels), 3))
-    return v_labels, att_labels
-
-def is_window_stationary(window_6: np.ndarray, hz=100):
-    """
-    ZUPT check per window (harsh zupt.py:39-40 thresholds, scaled for vehicle 100Hz).
-    window_6 (200,6) linear_acc(3)+gyro(3) @100Hz
-    Returns True if stationary (acc var <0.05 and gyro var <0.01 for 0.5s)
-    DEPRECATED wrapper — use python.core.signal.is_window_stationary.
-    """
-    return bool(_core_is_stationary(window_6, hz=hz))
-
-def _driver_of(path: str) -> str:
-    """Driver letter from the category dir, e.g. 'Vtb (Driver E)' -> 'E'."""
-    import re as _re
-
-    grandparent = Path(path).parent.parent.name
-    m = _re.search(r"Driver ([A-Z])", grandparent)
-    return m.group(1) if m else "?"
+_CHUNK = 50_000  # memmap save chunk (windows per write)
 
 
-def stratified_split(
-    s_files: list, train_ratio: float = 0.8, seed: int = 26168
-) -> tuple[list, list]:
-    """Split files 80/20 within (driver × speed-tercile) buckets.
-
-    Same seed family as the random split, so results are reproducible. Buckets
-    with a single file go to train (cannot split one file). Prints the bucket
-    table for the audit trail.
-    """
-    means: dict[str, float] = {}
-    for f in s_files:
+def _process_file_list(
+    file_list: list[str], hz: int, window: int, stride: int,
+    interrupted: dict, subset_label: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Window every non-rejected file; stop early on Ctrl-C (partial save)."""
+    all_windows: list[np.ndarray] = []
+    all_v: list[np.ndarray] = []
+    for idx_f, f in enumerate(file_list):
+        if interrupted["flag"]:
+            logger.warning(f"[interrupt] stopping after {idx_f}/{len(file_list)} files, saving partial...")
+            break
         try:
             df = load_phone_csv(f)
-            v_c = find_column(df, r"gps speed") or "GPS SPEED (Kmh)"
-            vals = df[v_c].values.astype(float) if v_c in df.columns else np.zeros(len(df))
-            means[f] = float(np.nanmean(vals))
-        except Exception:
-            means[f] = 0.0
-    ordered = sorted(means.values())
-    lo, hi = ordered[len(ordered) // 3], ordered[2 * len(ordered) // 3]
-    buckets: dict[tuple[str, str], list] = {}
-    for f in s_files:
-        band = "lo" if means[f] < lo else ("hi" if means[f] > hi else "mid")
-        buckets.setdefault((_driver_of(f), band), []).append(f)
-    train_files, val_files = [], []
-    for bi, key in enumerate(sorted(buckets)):
-        members = sorted(buckets[key])
-        if len(members) == 1:
-            train_files.extend(members)
-            logger.info(f"[strat] bucket {key}: n=1 -> train (singleton)")
+            result = process_file(df, hz=hz, window=window, stride=stride)
+            short_name = f"{Path(f).parent.name}/{Path(f).name}"
+            if result is None:
+                # Distinguish reject (gaps) vs too-short by re-running audit
+                logger.info(f"[skip] {short_name}: rejected or too short for window={window}")
+                continue
+            grav_str = "n/a" if np.isnan(result.gravity_max_diff) else f"{result.gravity_max_diff:.2f}"
+            logger.info(
+                f"[ok] {short_name}: T->{result.n_resampled} windows={len(result.windows)} "
+                f"stationary={result.stationary.sum()} median_dt={result.audit.median_dt_ms:.1f}ms "
+                f"gap_frac={result.audit.gap_fraction:.1%} {result.audit.rate_flag} grav_xdiff={grav_str}"
+            )
+            all_windows.append(result.windows)
+            all_v.append(result.v_ms)
+        except Exception as e:  # noqa: BLE001 — one bad file must not kill the run
+            logger.error(f"[err] {f}: {e}")
+            import traceback
+
+            traceback.print_exc()
             continue
-        brng = np.random.default_rng(seed * 1000 + bi)
-        perm = brng.permutation(len(members))
-        n_tr = max(1, int(len(members) * train_ratio))
-        tr_idx = set(perm[:n_tr].tolist())
-        for i, m in enumerate(members):
-            (train_files if i in tr_idx else val_files).append(m)
-        logger.info(f"[strat] bucket {key}: n={len(members)} -> train {n_tr} val {len(members) - n_tr}")
-    return train_files, val_files
+    if not all_windows:
+        return np.empty((0, window, 6)), np.empty((0,))
+    return np.concatenate(all_windows, axis=0), np.concatenate(all_v, axis=0)
 
 
-def main():
+def _save_windows_memmap(
+    path: Path, X: np.ndarray, mean: np.ndarray, std: np.ndarray
+) -> None:
+    """Chunked memmap save: never hold X and X_normalized in RAM at once.
+
+    This is what OOM-killed the Colab run on the full 822k set (7.8 GB
+    peak) — np.lib.format.open_memmap writes a proper .npy header that
+    np.load(mmap_mode='r') accepts.
+    """
+    fp = np.lib.format.open_memmap(path, mode="w+", dtype=np.float32, shape=X.shape)
+    for start in range(0, X.shape[0], _CHUNK):
+        end = min(X.shape[0], start + _CHUNK)
+        fp[start:end] = ((X[start:end].astype(np.float64) - mean) / std).astype(np.float32)
+    del fp  # flush via __del__
+
+
+def main() -> None:
+    """CLI entry: parse, split, window, scale, save npys + scaler.json."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--subset", choices=["1h","full"], default="full")
-    ap.add_argument("--window", type=int, default=200)
-    ap.add_argument("--stride", type=int, default=10)
-    ap.add_argument("--hz", type=int, default=100)
-    ap.add_argument("--train-ratio", type=float, default=0.8)
-    ap.add_argument("--split", choices=["random","stratified"], default="random",
+    ap.add_argument("--subset", choices=["1h", "full"], default="full")
+    ap.add_argument("--window", type=int, default=WINDOW)
+    ap.add_argument("--stride", type=int, default=STRIDE)
+    ap.add_argument("--hz", type=int, default=HZ)
+    ap.add_argument("--train-ratio", type=float, default=TRAIN_RATIO)
+    ap.add_argument("--split", choices=["random", "stratified"], default="random",
                     help="random=seeded shuffle (default, backward compat); stratified=80/20 within driver×speed buckets (ADR-010 branch A)")
-    ap.add_argument("--out", default="data/processed")
-    ap.add_argument("--scaler", default="python/scaler.json")
-    ap.add_argument("--resume", action="store_true", help="resume from existing npy if interrupted (skip completed files)")
+    ap.add_argument("--out", default=str(PROCESSED_DIR))
+    ap.add_argument("--scaler", default=str(SCALER_PATH))
+    ap.add_argument("--base", default=str(IOVNBD_BASE),
+                    help="dataset base dir containing **/S-*.csv")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip if output npys already exist (rm -rf to force)")
     ap.add_argument("--log-dir", default=None, help="optional dir for a run log file")
     args = ap.parse_args()
 
     init_runlog("preprocess", args.log_dir)
 
-    base = Path("data/iovnbd/Synchronised V abd S datasets/Categorised IOVNB Dataset")
-    s_files = sorted(glob.glob(str(base / "**/S-*.csv"), recursive=True))
+    s_files = sorted(glob.glob(str(Path(args.base) / "**/S-*.csv"), recursive=True))
     if args.subset == "1h":
         s_files = s_files[:3]
-    logger.info(f"[preprocess] {len(s_files)} S files, window={args.window} stride={args.stride} hz={args.hz} resume={args.resume}")
+    logger.info(
+        f"[preprocess] {len(s_files)} S files, window={args.window} "
+        f"stride={args.stride} hz={args.hz} resume={args.resume}"
+    )
+    if not s_files:
+        logger.error(f"[err] no S-*.csv under {args.base} — run download_iovnbd.py first")
+        sys.exit(1)
 
-    # resume: if output exists and is recent, skip (user can rm -rf data/processed to force)
-    out_path = Path(args.out)
-    if args.resume and (out_path / "train_windows.npy").exists() and (out_path / "val_windows.npy").exists():
-        logger.info(f"[resume] {out_path}/train_windows.npy exists ({(out_path/'train_windows.npy').stat().st_size/1e9:.2f}GB), skipping preprocess. Use --no-resume or rm -rf {out_path} to force.")
+    out = Path(args.out)
+    paths = processed_paths(out)
+    if args.resume and paths["train_windows"].exists() and paths["val_windows"].exists():
+        gb = paths["train_windows"].stat().st_size / 1e9
+        logger.info(
+            f"[resume] {paths['train_windows']} exists ({gb:.2f}GB), skipping. "
+            f"Use --no-resume or rm -rf {out} to force."
+        )
         return
 
-    # split by trajectory (file), not window — prevents leakage (harsh/loaders.py:287)
-    if args.split == "stratified":
-        train_files, val_files = stratified_split(s_files, args.train_ratio)
-    else:
-        n_train_files = int(len(s_files) * args.train_ratio)
-        rng = np.random.default_rng(26168)
-        perm_files = rng.permutation(len(s_files))
-        train_files_idx = set(perm_files[:n_train_files])
-        train_files = [s_files[i] for i in range(len(s_files)) if i in train_files_idx]
-        val_files = [s_files[i] for i in range(len(s_files)) if i not in train_files_idx]
-    logger.info(f"[split:{args.split}] train files {len(train_files)} val files {len(val_files)} (by trajectory, seed 26168)")
+    # Split by trajectory (file), never by window — leakage guard.
+    train_files, val_files = split_files(s_files, strategy=args.split, train_ratio=args.train_ratio)
+    logger.info(f"[split:{args.split}] train files {len(train_files)} val files {len(val_files)} (by trajectory)")
 
-    # handle Ctrl-C gracefully: save what we have so far
-    import signal
+    # Graceful Ctrl-C: save partial progress, scaler from what we have.
     interrupted = {"flag": False}
-    def handle_sigint(sig, frame):
+
+    def handle_sigint(sig, frame) -> None:
         interrupted["flag"] = True
         logger.warning("\n[interrupt] Ctrl-C detected, will save partial progress and exit...")
+
     orig_handler = signal.signal(signal.SIGINT, handle_sigint)
-
-    def process_file_list(file_list):
-        all_windows = []
-        all_v = []
-        for idx_f, f in enumerate(file_list):
-            if interrupted["flag"]:
-                logger.warning(f"[interrupt] stopping after {idx_f}/{len(file_list)} files, saving partial...")
-                break
-            try:
-                df = load_phone_csv(f)
-                # robust column mapping
-                acc_cols = [find_column(df, rf"accelerometer.*{axis}") for axis in ["x","y","z"]]
-                grav_cols = [find_column(df, rf"gravity.*{axis}") for axis in ["x","y","z"]]
-                gyro_cols = [find_column(df, r"gyroscope.*yaw"), find_column(df, r"gyroscope.*pitch"), find_column(df, r"gyroscope.*roll")]
-                # fallback to exact names if regex fails
-                if None in acc_cols:
-                    acc_cols = ["ACCELEROMETER X (m/s²)", "ACCELEROMETER Y (m/s²)", "ACCELEROMETER Z (m/s²)"]
-                if None in grav_cols:
-                    grav_cols = ["GRAVITY X (m/s²)", "GRAVITY Y (m/s²)", "GRAVITY Z (m/s²)"]
-                if None in gyro_cols:
-                    gyro_cols = ["GYROSCOPE Yaw (rad/s)", "GYROSCOPE Pitch (rad/s)", "GYROSCOPE Roll (rad/s)"]
-                time_col = find_column(df, r"time since start")
-                gps_speed_col = find_column(df, r"gps speed")
-                if time_col is None:
-                    time_col = "TIME SINCE START (ms)"
-                if gps_speed_col is None:
-                    gps_speed_col = "GPS SPEED (Kmh)"
-
-                # validate time monotonic (sivaraman/ekf:65)
-                t_ms_raw = df[time_col].values.astype(float)
-                # check monotonic (allow resets per file: just check diff within file)
-                diffs = np.diff(t_ms_raw)
-                if np.any(diffs <= 0):
-                    # fix: sort by time
-                    order = np.argsort(t_ms_raw)
-                    df = df.iloc[order].reset_index(drop=True)
-                    t_ms_raw = df[time_col].values.astype(float)
-
-                # build t_ns
-                t_ns = (t_ms_raw * 1e6).astype(np.int64)  # ms -> ns
-                # P4 timestamp discipline: audit dt BEFORE resampling.
-                # - median_dt + gap fraction are logged per file
-                # - >5% gaps  => reject file (holey interpolation poisons windows)
-                # - odd rate  => flagged (S-M 51ms / S4 80ms are known)
-                dts_ms = np.diff(t_ms_raw)
-                finite_dts = dts_ms[np.isfinite(dts_ms)]
-                if len(finite_dts) > 0:
-                    median_dt_ms = float(np.median(finite_dts))
-                    gap_thr_ms = max(3.0 * median_dt_ms, 150.0)  # 1 dropped 10Hz sample OR 150ms
-                    gap_frac = float(np.mean(finite_dts > gap_thr_ms))
-                else:
-                    median_dt_ms, gap_frac = float("nan"), 0.0
-                rate_expected_ms = 1000.0 / 10.0  # IO-VNBD S files are 10Hz
-                rate_flag = "odd-rate" if abs(median_dt_ms - rate_expected_ms) > 15.0 else ""
-                if gap_frac > 0.05:
-                    logger.error(
-                        f"[reject] {Path(f).parent.name}/{Path(f).name}: "
-                        f"gap_frac={gap_frac:.1%} >5% (median_dt={median_dt_ms:.1f}ms) — "
-                        f"file excluded from {args.out}"
-                    )
-                    continue
-
-                acc_raw = df[acc_cols].values.astype(np.float64)
-                grav_cols_present = None not in grav_cols and all(c in df.columns for c in grav_cols)
-                gyro = df[gyro_cols].values.astype(np.float64)
-
-                # Spec v2 (P1): gravity via the live low-pass — the SAME filter
-                # the Android LeanDetector runs per 100Hz sample. Dataset GRAVITY
-                # columns are only a cross-check now (train/live parity, not truth).
-                grav_est = estimate_gravity_lowpass(acc_raw)  # (N,3)
-                if grav_cols_present:
-                    grav_col_vals = df[grav_cols].values.astype(np.float64)
-                    grav_diff = np.abs(grav_est - grav_col_vals).max()
-                else:
-                    grav_diff = float("nan")
-
-                # gravity align: linear acc = acc - grav_est (removes 9.81 before scaler)
-                linear_acc = gravity_align_linear(acc_raw, grav_est)  # (N,3)
-
-                # stack IMU: linear_acc (3) + gyro (3) = 6ch
-                imu_6 = np.concatenate([linear_acc, gyro], axis=1)  # (N,6)
-
-                # resample via resample_uniform per channel with ns
-                # need to handle NaN from interp left/right
-                t_new_ns, imu_new = resample_uniform(t_ns, imu_6, args.hz)
-                # also resample gps speed for labels
-                gps_speed_raw = df[gps_speed_col].values.astype(np.float64) if gps_speed_col in df.columns else np.zeros(len(df))
-                _, gps_speed_new = resample_uniform(t_ns, gps_speed_raw, args.hz)
-
-                # drop NaN rows from resample (outside overlap)
-                finite_mask = np.isfinite(imu_new).all(axis=1) & np.isfinite(gps_speed_new)
-                t_new_ns = t_new_ns[finite_mask]
-                imu_new = imu_new[finite_mask]
-                gps_speed_new = gps_speed_new[finite_mask]
-
-                if len(imu_new) < args.window:
-                    logger.info(f"[skip] {Path(f).parent.name}/{Path(f).name}: too short after resample {len(imu_new)}")
-                    continue
-
-                windows = make_windows(imu_new.astype(np.float32), window=args.window, stride=args.stride)
-                if len(windows) == 0:
-                    continue
-
-                # labels from resampled gps_speed_new
-                df_100_dummy = pd.DataFrame({gps_speed_col: gps_speed_new})
-                idx = list(range(len(windows)))
-                v_labels, _ = compute_labels(df_100_dummy, idx, stride=args.stride, window=args.window, gps_speed_col=gps_speed_col)
-
-                # ZUPT stationary flags per window (P1 wiring, harsh zupt.py:39-40)
-                # Use IMU variance + speed gate (<0.5 m/s)
-                stationary = np.array([is_window_stationary(w, hz=args.hz) for w in windows])
-                # also gate by speed: if v_label <0.5, keep stationary, else False (vehicle moving but low var e.g. smooth highway)
-                stationary = stationary & (v_labels < 0.5)
-                # for stationary windows, force v_label=0 (ZUPT)
-                v_labels = np.where(stationary, 0.0, v_labels)
-
-                all_windows.append(windows)
-                all_v.append(v_labels)
-                # also collect stationary for saving (optional)
-                if not hasattr(process_file_list, "all_stationary"):
-                    process_file_list.all_stationary = []
-                process_file_list.all_stationary.append(stationary)
-                grav_str = "n/a" if np.isnan(grav_diff) else f"{grav_diff:.2f}"
-                logger.info(
-                    f"[ok] {Path(f).parent.name}/{Path(f).name}: T={len(df)}->{len(imu_new)} "
-                    f"windows={len(windows)} stationary={stationary.sum()} median_dt={median_dt_ms:.1f}ms "
-                    f"gap_frac={gap_frac:.1%} {rate_flag} grav_xdiff={grav_str}"
-                )
-            except Exception as e:
-                logger.error(f"[err] {f}: {e}")
-                import traceback; traceback.print_exc()
-                continue
-        if not all_windows:
-            return np.empty((0, args.window, 6)), np.empty((0,)), np.empty((0,), dtype=bool)
-        X = np.concatenate(all_windows, axis=0)
-        v = np.concatenate(all_v, axis=0)
-        # collect stationary from attribute
-        if hasattr(process_file_list, "all_stationary"):
-            stationary = np.concatenate(process_file_list.all_stationary, axis=0)
-            # clear for next call
-            delattr(process_file_list, "all_stationary")
-        else:
-            stationary = np.zeros(len(X), dtype=bool)
-        return X, v, stationary
-
     try:
-        X_train, v_train, stat_train = process_file_list(train_files)
-        X_val, v_val, stat_val = process_file_list(val_files)
+        X_train, v_train = _process_file_list(train_files, args.hz, args.window, args.stride, interrupted, args.subset)
+        X_val, v_val = _process_file_list(val_files, args.hz, args.window, args.stride, interrupted, args.subset)
     finally:
         signal.signal(signal.SIGINT, orig_handler)
 
     if interrupted["flag"]:
-        # save partial even if val empty, so resume can detect
-        if 'X_train' in locals() and len(X_train) > 0:
-            logger.warning(f"[interrupt] saving partial train {X_train.shape} val {X_val.shape if 'X_val' in locals() and len(X_val)>0 else 'none'}")
-            # still need scaler from what we have (train-only)
-            _sc = TrainOnlyScaler()
-            _sc.fit(X_train, train_files=train_files)
-            _sc.save(args.scaler)
-            # attach run metadata (hz/window/stride/partial) alongside train-only stats
-            with open(args.scaler) as _f:
-                _sj = json.load(_f)
-            _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride, "partial": True})
-            with open(args.scaler, "w") as _f:
-                json.dump(_sj, _f, indent=2)
-            attach_spec(args.scaler)  # P2: spec fingerprint even on partials
-            mean = _sc.mean; std = _sc.std
-            out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-            np.save(out / "train_windows.npy", ((X_train - mean)/std).astype(np.float32))
-            np.save(out / "train_v.npy", v_train.astype(np.float32))
-            if 'X_val' in locals() and len(X_val)>0:
-                np.save(out / "val_windows.npy", ((X_val - mean)/std).astype(np.float32))
-                np.save(out / "val_v.npy", v_val.astype(np.float32))
-            logger.warning(f"[interrupt] partial saved to {args.out}, re-run with --resume to skip or rm -rf to restart")
+        if len(X_train) > 0:
+            _finalize(args, out, paths, X_train, v_train, X_val, v_val, partial=True)
         return
 
-    logger.info(f"[concat] train X {X_train.shape} v {v_train.shape} stationary {stat_train.sum()}/{len(stat_train)} | val X {X_val.shape} v {v_val.shape} stationary {stat_val.sum()}/{len(stat_val)}")
+    logger.info(
+        f"[concat] train X {X_train.shape} v {v_train.shape} | "
+        f"val X {X_val.shape} v {v_val.shape}"
+    )
     if len(X_train) == 0 or len(X_val) == 0:
-        logger.error("[err] no windows")
-        return
-    logger.info(f"  train mean {X_train.mean(axis=(0,1))} std {X_train.std(axis=(0,1))}")
-    logger.info(f"  val mean {X_val.mean(axis=(0,1))} std {X_val.std(axis=(0,1))}")
+        logger.error("[err] no windows — check dataset/download + quality gates")
+        sys.exit(1)
+    logger.info(f"  train mean {X_train.mean(axis=(0, 1))} std {X_train.std(axis=(0, 1))}")
+    logger.info(f"  val mean {X_val.mean(axis=(0, 1))} std {X_val.std(axis=(0, 1))}")
 
-    # scaler from train only (train-only, sivaraman/agastya) via shared TrainOnlyScaler
-    _scaler = TrainOnlyScaler()
-    _scaler.fit(X_train, train_files=train_files)
-    _scaler.save(args.scaler)
-    # attach run metadata alongside train-only stats
-    with open(args.scaler) as _f:
-        _sj = json.load(_f)
-    _sj.update({"hz": args.hz, "window": args.window, "stride": args.stride})
-    with open(args.scaler, "w") as _f:
-        json.dump(_sj, _f, indent=2)
-    # P2: stamp spec_version + spec_sha256 — export/Android refuse unversioned scalers.
-    attach_spec(args.scaler)
-    mean = _scaler.mean; std = _scaler.std
-    logger.info(f"[scaler] {args.scaler} mean {mean} std {std}")
+    _finalize(args, out, paths, X_train, v_train, X_val, v_val, partial=False)
 
-    out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    # For full 822k (3.9GB) we must not hold X_train and X_train_n (7.8GB) in RAM at once — stream to disk via memmap.
-    # This is what OOM-killed Colab (looked like ^C).
+
+def _finalize(args, out: Path, paths: dict[str, Path],
+               X_train, v_train, X_val, v_val, partial: bool) -> None:
+    """Fit train-only scaler, save npys (chunked memmap), stamp spec."""
+    scaler_path = Path(args.scaler)
+    scaler = TrainOnlyScaler()
+    scaler.fit(X_train, train_files=[f"train:{args.split}"])
+    scaler.save(scaler_path)
+
+    # Attach run metadata alongside train-only stats, then the spec stamp (P2).
+    with open(scaler_path) as f:
+        sj = json.load(f)
+    sj.update({"hz": args.hz, "window": args.window, "stride": args.stride})
+    if partial:
+        sj["partial"] = True
+    with open(scaler_path, "w") as f:
+        json.dump(sj, f, indent=2)
+    attach_spec(scaler_path)
+    mean, std = scaler.mean, scaler.std
+    logger.info(f"[scaler] {scaler_path} mean {mean} std {std}")
+
+    out.mkdir(parents=True, exist_ok=True)
     try:
-        # Use open_memmap for proper .npy header (np.memmap raw fails np.load with mmap_mode)
-        def save_memmap(path, arr, dtype=np.float32):
-            shape = arr.shape
-            # Create proper .npy via open_memmap
-            fp = np.lib.format.open_memmap(path, mode='w+', dtype=dtype, shape=shape)
-            chunk = 50000
-            for start in range(0, shape[0], chunk):
-                end = min(shape[0], start + chunk)
-                # X_train/X_val are float32, compute (X - mean)/std chunked
-                if "train_windows" in path.name:
-                    chunk_arr = X_train[start:end].astype(np.float64)
-                elif "val_windows" in path.name:
-                    chunk_arr = X_val[start:end].astype(np.float64)
-                else:
-                    chunk_arr = None
-                if chunk_arr is None:
-                    chunk_arr = v_train[start:end] if "train_v" in path.name else v_val[start:end]
-                    fp[start:end] = chunk_arr.astype(dtype)
-                else:
-                    fp[start:end] = ((chunk_arr - mean) / std).astype(dtype)
-                del chunk_arr
-            del fp  # flush via delete
-
-        # For v arrays, no memmap needed (small)
-        np.save(out / "train_v.npy", v_train.astype(np.float32))
-        np.save(out / "val_v.npy", v_val.astype(np.float32))
-        # For windows, use memmap chunked
-        save_memmap(out / "train_windows.npy", X_train, np.float32)
-        save_memmap(out / "val_windows.npy", X_val, np.float32)
-        # Free original arrays before exit to help Colab
-        del X_train, X_val
-        import gc; gc.collect()
+        np.save(paths["train_v"], v_train.astype(np.float32))
+        np.save(paths["val_v"], v_val.astype(np.float32))
+        _save_windows_memmap(paths["train_windows"], X_train, mean, std)
+        if len(X_val) > 0:
+            _save_windows_memmap(paths["val_windows"], X_val, mean, std)
         logger.info(f"[save] {out}/train_windows.npy via memmap (no OOM)")
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — fallback keeps the scaler usable for streaming
         logger.warning(f"[warn] memmap save failed ({e}), falling back to scaler-only + streaming.")
-        import traceback; traceback.print_exc()
+        import traceback
+
+        traceback.print_exc()
         (out / ".streaming").touch()
-        logger.info(f"[save] scaler only at {args.scaler}, train with streaming")
+        logger.info(f"[save] scaler only at {scaler_path}, train with streaming")
+        return
+    if partial:
+        logger.warning(f"[interrupt] partial saved to {out}, re-run with --resume or rm -rf to restart")
+
 
 if __name__ == "__main__":
     main()
