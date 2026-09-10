@@ -16,6 +16,10 @@ only with a reviewer from the other track (CODEOWNERS enforces this).
   - Gate: `reports/tflite_diff.txt` max abs diff <1e-2 FP16 (ADR-005).
 - **Change protocol:** re-export → update diff log → `copyModelAssets` pulls it
   into the APK at build → AI crew posts new `val MSE + drift_2d.json`.
+- **Provenance:** `model_manifest.json` (written by `python/export/tflite.py`)
+  binds `model_sha256` + `scaler_sha256` + `spec_sha256`; release CI and the
+  Android startup guard verify hashes before trusting the pair. A stale or
+  unversioned scaler is REFUSED at export time (exit 2).
 
 ## 2. `scaler.json` — normalization stats
 

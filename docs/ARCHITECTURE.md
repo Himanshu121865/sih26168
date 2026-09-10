@@ -192,6 +192,42 @@ flowchart TB
 
 *   **Mandatory for proposal:** Include `drift_plot.png` inferred from IO-VNBD subset — judges screening use *more hidden datasets*.
 
+#### Python package layout (single-implementation rule)
+
+The window path `raw CSV → resample → gravity-remove → normalize → (200,6)` is
+the frozen core — every past silent breakage lived here. The refactor
+(2026-09-10) enforces one implementation per concern:
+
+```
+python/
+├── config.py            # every default path/constant (single source)
+├── core/                 # pure, typed, testable primitives
+│   ├── signal.py         # resample + gravity + stationary   (98% cov)
+│   ├── scaler.py          # train-only Z-score stats
+│   ├── spec.py            # window-spec fingerprints (P2 gates)
+│   ├── training.py        # THE train loop + augmentations + NLL
+│   ├── runlog.py          # run-scoped loguru
+│   └── types.py           # ImuSample / GnssFix contracts
+├── datasets/
+│   ├── iovnbd.py          # THE window pipeline (load→resolve→dt-audit→
+│   │                      #  sort→gravity→resample→window→ZUPT labels)
+│   ├── split.py           # random + stratified by-trajectory splits
+│   └── iovnbd_dataset.py  # torch Dataset (npy memmap | streaming)
+├── models/                # avnet.py (AVNet/Lite), lean_estimator.py,
+│                          # adapter.py (deprecated stub)
+├── fusion/                # ine_kf.py (21-DOF InEKF) + replay.py —
+│                          # the Kotlin port reference
+├── eval/                  # metrics.py (ATE/RTE) + drift.py (1d/2d plots)
+├── export/                # tflite.py (ONNX/TFLite + gates + manifest)
+├── maps/                  # build_graph.py (OSM PBF → road graph)
+└── <script>.py            # THIN CLIs: preprocess, train_avnet,
+                           # inekf_harness, eval_drift, eval_per_file,
+                           # export_tflite, download_iovnbd
+```
+
+Rules: scripts import from layers, never the reverse; no module re-implements
+a pipeline step that exists in `core/`/`datasets/`; CLIs stay argparse-only.
+
 ---
 
 ## 4. Data Flow & Interfaces

@@ -148,7 +148,7 @@ def main():
     title_paras = shape_by_id(s1, 4).text_frame.paragraphs
     title_para = next((p for p in title_paras if p.text.strip()), title_paras[0])
     set_para_text(title_para, TITLE)
-    for para, text in zip(shape_by_id(s1, 10).text_frame.paragraphs[1:], S1_DETAILS):
+    for para, text in zip(shape_by_id(s1, 10).text_frame.paragraphs[1:], S1_DETAILS, strict=False):
         set_para_text(para, text)
 
     # ---- slide 2: idea + drift plot (two-column: text left, plot right) ----

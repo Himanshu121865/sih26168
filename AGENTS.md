@@ -377,6 +377,18 @@ Planned (see README §12):
 
 ## Build Notes for Next Agent
 
+0. **Production refactor landed 2026-09-10** — layered architecture, ONE
+   implementation per concern. Read `docs/ARCHITECTURE.md §3.6 "Python
+   package layout"` first. Key rules: `python/datasets/iovnbd.py` is THE
+   window pipeline (never re-implement a step in a script); `python/fusion/`
+   (ine_kf.py + replay.py) is the Kotlin port reference — inekf_harness.py
+   is a thin CLI that re-exports the fusion symbols; `python/core/training.py`
+   is THE train loop; `python/config.py` holds every default path + P4
+   `QualityGates`. Tests: 125 (17% → 59% cov; core/fusion/models 96-100%).
+   `make lint` (ruff, zero tolerance) + `make types` (strict mypy, pure
+   core) + `make test` are the gates. eval_per_file.py was silently using
+   spec-v1 dataset gravity — fixed, audit now matches training exactly.
+   run_replay no longer ZeroDivides on fully-stopped segments.
 1. **Do not use RoNIN weights** — license + domain mismatch. Train from scratch using QDeepOdo as template, fix `Flatten(0)` → `Flatten(start_dim=1)`, fix `hx` init to zeros, handle dtype (paper uses float64 in InEKF, float32 in CNN).
 2. **IO-VNBD adaptation:** Done — 10Hz→100Hz interp verified, `DATA_INSPECTION.md` written, `scaler.json` train-only.
 3. **Merged AVNet:** Done — `AVNetLite` 460k 0.93MB, `AVNet` 13.6M. Train jointly: `L = MSE(v) + MSE(att) + λ·NLL`. Consider **TCN** (harsh) if GRU latency >8ms.

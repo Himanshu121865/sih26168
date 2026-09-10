@@ -90,12 +90,19 @@ Full 50-epoch GPU training: open `sih26168_colab.ipynb` in Colab (T4 GPU) — ta
 
 ```
 sih26168/
-├── python/               # all code: training, preprocessing, evaluation, export
+├── python/               # layered package (one implementation per concern)
+│   ├── config.py         # all default paths/constants + P4 quality gates
+│   ├── core/             # signal, scaler, spec fingerprints, training loop, logging
+│   ├── datasets/         # THE window pipeline (iovnbd.py), splits, torch Dataset
 │   ├── models/           # AVNetLite model, lean estimator, uncertainty adapter
-│   ├── utils/            # ZUPT, lie group math, metrics
-│   └── datasets/         # IO-VNBD dataset loader
+│   ├── fusion/           # 21-DOF InEKF + outage replay (Kotlin port reference)
+│   ├── eval/             # ATE/RTE metrics + 1D/2D drift plots
+│   ├── export/           # ONNX/TFLite export + spec gates + manifest
+│   ├── maps/             # OSM PBF → road graph
+│   └── *.py              # thin CLIs: preprocess, train_avnet, inekf_harness, ...
+├── tests/                # 125 tests (pipeline parity, InEKF physics, replay e2e)
 ├── docs/
-│   ├── ARCHITECTURE.md   # system design, diagrams, data flow
+│   ├── ARCHITECTURE.md   # system design, diagrams, data flow, package layout
 │   ├── DATA_INSPECTION.md    # dataset analysis
 │   └── IMPROVEMENTS_FROM_COMPETITORS.md  # 13 fixes learned from other teams
 ├── ref/competitors/      # other teams' code, kept for reference only
